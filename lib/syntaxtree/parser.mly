@@ -41,6 +41,7 @@
 %token NESTED_KW
 %token AUX_KW
 %token ROLE_KW
+%token RELIABLE_KW
 
 %token FROM_KW
 %token TO_KW
@@ -99,10 +100,24 @@ let raw_global_protocol_decl ==
   rs = role_decls ;
   ann = annotation? ; body = global_protocol_body ;
   {
+    (* used to split roles into reliable and unreliable roles *)
+    let rec split_roles = function
+        | [] -> ([], [])
+        | (role :: roles) -> (
+            let (rs, reliable_rs) = split_roles roles in
+            match role with
+            | Role r -> (r :: rs, reliable_rs)
+            | ReliableRole r -> (rs, r :: reliable_rs) ) in 
+    let nested_rs = [] in
+    let (rs', reliable_rs)= split_roles rs in 
     let (nested_protos, ints) = body in
     { name = nm
-    ; roles = rs
-    ; split_roles = (rs, [])
+    ; roles = rs' @ nested_rs @ reliable_rs 
+    ; split_roles = 
+        { roles = rs'
+        ; nested_roles = nested_rs
+        ; reliable_roles = reliable_rs
+        }
     ; nested_protocols = nested_protos
     ; interactions = ints
     ; ann = ann
@@ -116,14 +131,35 @@ let raw_nested_protocol_decl ==
   rs = nested_role_decls ;
   ann = annotation? ; body = global_protocol_body ;
   {
+    (* used to split roles into reliable and unreliable roles *)
+    let rec split_roles = function
+        | [] -> ([], [])
+        | (role :: roles) -> (
+            let (rs, reliable_rs) = split_roles roles in
+            match role with
+            | Role r -> (r :: rs, reliable_rs)
+            | ReliableRole r -> (rs, r :: reliable_rs) ) 
+    (* used to unpack role constructor from list of new roles *)
+    and unpack_roles = function 
+        | [] -> []
+        | (Role r :: roles) -> r :: unpack_roles roles 
+        | (ReliableRole r :: roles) -> r :: unpack_roles roles in
+    let (rs', nested_rs) = rs in
+    let (rs'', reliable_rs)= split_roles rs' in
+    let unpacked_nrs = unpack_roles nested_rs in
     let (nested_protos, ints) = body in
     { name = nm
-    ; roles = (let (rs', rs'') = rs in rs' @ rs'')
-    ; split_roles = rs
+    ; roles = rs'' @ unpacked_nrs @ reliable_rs
+    ; split_roles = 
+        { roles = rs''
+        ; nested_roles = unpacked_nrs
+        ; reliable_roles = reliable_rs
+        }
     ; nested_protocols = nested_protos
     ; interactions = ints
     ; ann = ann
   } }
+
 
 let protocol_hdr ==
   GLOBAL_KW ; PROTOCOL_KW? ; { () }
@@ -138,10 +174,13 @@ let role_decls == LPAR ; nms = separated_nonempty_list(COMMA, role_decl) ;
 let nested_role_decls == LPAR ; nms = separated_nonempty_list(COMMA, role_decl) ;
                          new_nms = loption(new_role_decls) ; RPAR ; { (nms, new_nms) }
 
-let role_decl == ROLE_KW ; nm = rolename ; { nm }
+let role_decl == 
+    | ROLE_KW ; nm = rolename ; { Role (nm) } 
+    | RELIABLE_KW ; ROLE_KW ; nm = rolename ; { ReliableRole (nm) } 
 
 let new_role_decls == SEMICOLON ; NEW_KW ;
                       nms = separated_nonempty_list(COMMA, role_decl) ; { nms }
+
 
 let global_protocol_body ==
   LCURLY ; nested_protos = nested_protocol_decl*; ints = global_interaction* ;
