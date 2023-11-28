@@ -98,6 +98,7 @@ and token lexbuf =
   | "nested" -> NESTED_KW
   | "aux" -> AUX_KW
   | "role" -> ROLE_KW
+  | "reliable" -> RELIABLE_KW
   | "from" -> FROM_KW
   | "to" -> TO_KW
   | "choice" -> CHOICE_KW
