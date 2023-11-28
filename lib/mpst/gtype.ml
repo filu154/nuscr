@@ -616,7 +616,8 @@ let nested_t_of_module (scr_module : Syntax.scr_module) =
     in
     let proto_name = protocol.value.name in
     let gtype = of_protocol protocol in
-    let static_roles, dynamic_roles = protocol.value.split_roles in
+    let static_roles = protocol.value.split_roles.roles @ protocol.value.split_roles.reliable_roles in
+    let dynamic_roles = protocol.value.split_roles.nested_roles in
     let nested_protocol_names =
       List.map ~f:(fun {Loc.value= {name; _}; _} -> name) nested_protocols
     in
