@@ -73,6 +73,10 @@ let show_payloadt = function
 
 let pp_payloadt fmt p = Stdlib.Format.fprintf fmt "%s" (show_payloadt p)
 
+type role = 
+    | Role of RoleName.t
+    | ReliableRole of RoleName.t
+[@@deriving sexp_of]
 type message =
   | Message of {name: LabelName.t; payload: payloadt list}
   | MessageName of LabelName.t

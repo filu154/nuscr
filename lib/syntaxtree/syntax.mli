@@ -35,6 +35,10 @@ type payloadt =
   | PayloadRTy of ty
 [@@deriving eq, ord, sexp_of, show]
 
+type role = 
+    | Role of RoleName.t
+    | ReliableRole of RoleName.t
+[@@deriving sexp_of]
 type message =
   | Message of {name: LabelName.t; payload: payloadt list}
   | MessageName of LabelName.t
