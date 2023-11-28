@@ -53,7 +53,8 @@ let decl_from_protocol prefix (protocol : global_protocol) =
   in
   let proto_name = name_with_prefix prefix protocol.value.name in
   let all_roles = extract_rolenames protocol.value.roles in
-  let rs, new_rs = protocol.value.split_roles in
+  let rs = protocol.value.split_roles.roles @ protocol.value.split_roles.reliable_roles in
+  let new_rs = protocol.value.split_roles.nested_roles in
   let roles = extract_rolenames rs in
   let dynamic_roles = extract_rolenames new_rs in
   let split_decl = (roles, dynamic_roles) in
