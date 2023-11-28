@@ -39,6 +39,13 @@ type role =
     | Role of RoleName.t
     | ReliableRole of RoleName.t
 [@@deriving sexp_of]
+
+type roles = 
+    { roles: RoleName.t list
+    ; nested_roles: RoleName.t list
+    ; reliable_roles: RoleName.t list }
+[@@deriving sexp_of]
+
 type message =
   | Message of {name: LabelName.t; payload: payloadt list}
   | MessageName of LabelName.t
@@ -79,7 +86,7 @@ type global_protocol = raw_global_protocol located
 and raw_global_protocol =
   { name: ProtocolName.t
   ; roles: RoleName.t list
-  ; split_roles: RoleName.t list * RoleName.t list
+  ; split_roles: roles
   ; nested_protocols: global_protocol list
   ; interactions: global_interaction list
   ; ann: annotation option }
