@@ -42,6 +42,7 @@ type user_error =
   | UnsatisfiableRefinement (* TODO: Extra Message for error reporting *)
   | StuckRefinement (* TODO: Extra Message for error reporting *)
   | UnguardedTypeVariable of TypeVariableName.t
+  | UnawareOfCrash of RoleName.t * RoleName.t
 [@@deriving sexp_of]
 
 (** UserError is a user error and should be reported back so it can be fixed *)
@@ -139,6 +140,10 @@ let show_user_error = function
       sprintf "Unguarded type variable %s at %s"
         (TypeVariableName.user tv)
         (Loc.show (TypeVariableName.where tv))
+  | UnawareOfCrash (sender, receiver) ->
+      sprintf "%s is not aware of the crash when sending message to %s at %s"
+        (RoleName.user sender) (RoleName.user receiver)
+        (Loc.show (RoleName.where sender))
 
 let unimpl ~here desc = UnImplemented (desc, here) |> raise
 
