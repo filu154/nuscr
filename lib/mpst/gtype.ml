@@ -636,11 +636,11 @@ let nested_t_of_module (scr_module : Syntax.scr_module) =
 let add_to_set roles_to_ignore role set_of_roles = 
     if Set.mem roles_to_ignore role   
     then set_of_roles
-    else Set.add roles_to_ignore role
+    else Set.add set_of_roles role
 
-let get_first_receiver = function
+(* let get_first_receiver = function
     | MessageG (_, _, r, _) -> r
-    | _ -> RoleName.of_string ""
+    | _ -> RoleName.of_string "" *)
 
 let rec waiting_rs roles_to_ignore = function
     | MessageG (_, s, r, t) -> 
@@ -678,6 +678,10 @@ let rec generate_crash_branch (t: t) crashed_r waiting_rs =
         | CallG (caller, protocol, participants, t) -> CallG (caller, protocol, participants, generate_crash_branch t crashed_r waiting_rs)
         | EndG -> EndG
         | other_t -> other_t
+
+let apply_to_continuation f = function
+    | MessageG (msg, s, r, t) -> MessageG(msg, s, r, f t)
+    | g -> f g 
             
 
 (* add crash branch whenever communication from an unreliable role is found *)
@@ -698,21 +702,31 @@ let rec add_crash_branches (gtype : t) reliable_rs =
                 ; MessageG (msg, sender, receiver, add_crash_branches t reliable_rs)] )
 
         | ChoiceG (sender, choices) ->
-            (* with the assumption that every choice has a communication between sender and another role at the beginning *)
-            (* all branches generate the same crash behaviour, pick any one of them *)
-            (* in this implementation, the head of the list is picked *)
+            let unfolded_choices = List.map ~f:unfold choices in
+            (* with the assumption that we do not allow choice of choice of
+             * we can assume that after unfolding all branches if they start
+             * with a recursion, we are left 
+             * only with messages as the first communication *)
             let some_branch = 
-                match List.hd choices with
+                match List.hd unfolded_choices with
                     | None -> EndG
                     | Some branch -> branch in
-            let receiver = get_first_receiver some_branch in
-            let roles_to_ignore = Set.of_list(module RoleName) [sender; receiver] in
+            let roles_to_ignore = Set.singleton (module RoleName) sender in
             let waiting_rs' = waiting_rs roles_to_ignore some_branch in
             let crash_branch = generate_crash_branch some_branch sender waiting_rs' in 
-            ChoiceG(sender, crash_branch :: choices)
+            let uncrashed_branches = 
+                List.map
+                ~f: (apply_to_continuation (fun choice -> add_crash_branches choice reliable_rs))
+                unfolded_choices in
+            if Set.mem reliable_rs sender
+            then 
+                ChoiceG(sender, uncrashed_branches)
+            else
+                ChoiceG(sender, crash_branch :: uncrashed_branches)
 
         | MuG (tvar, el, t) -> MuG (tvar, el, add_crash_branches t reliable_rs)
-        | CallG (caller, protocol, participants, t) -> CallG (caller, protocol, participants, add_crash_branches t reliable_rs)
+        | CallG (caller, protocol, participants, t) -> 
+                CallG (caller, protocol, participants, add_crash_branches t reliable_rs)
         | EndG -> EndG
         | other_t -> other_t
 
