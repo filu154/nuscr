@@ -638,10 +638,6 @@ let add_to_set roles_to_ignore role set_of_roles =
     then set_of_roles
     else Set.add set_of_roles role
 
-(* let get_first_receiver = function
-    | MessageG (_, _, r, _) -> r
-    | _ -> RoleName.of_string "" *)
-
 let rec waiting_rs roles_to_ignore = function
     | MessageG (_, s, r, t) -> 
         waiting_rs roles_to_ignore t |> add_to_set roles_to_ignore s |> add_to_set roles_to_ignore r
