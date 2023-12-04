@@ -84,3 +84,6 @@ val normalise_nested_t : nested_t -> nested_t
 val validate_refinements_exn : t -> unit
 (** Validate refinements in the given global type, requires [RefinementTypes]
     pragma *)
+
+val graceful_failure : global_protocol -> t
+(** Introduce crash behaviour folloing the graceful failure pattern*)

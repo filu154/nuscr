@@ -631,3 +631,100 @@ let nested_t_of_module (scr_module : Syntax.scr_module) =
       ~f:add_protocol all_protocols
   in
   normalise_nested_t @@ add_missing_payload_field_names nested_t
+
+
+let add_to_set roles_to_ignore role set_of_roles = 
+    if Set.mem roles_to_ignore role   
+    then set_of_roles
+    else Set.add roles_to_ignore role
+
+let get_first_receiver = function
+    | MessageG (_, _, r, _) -> r
+    | _ -> RoleName.of_string ""
+
+let rec waiting_rs roles_to_ignore = function
+    | MessageG (_, s, r, t) -> 
+        waiting_rs roles_to_ignore t |> add_to_set roles_to_ignore s |> add_to_set roles_to_ignore r
+    | ChoiceG (s, choices) ->
+            let waiting_rs' = List.map ~f:(waiting_rs roles_to_ignore) choices in
+            Set.union_list (module RoleName) waiting_rs' |> add_to_set roles_to_ignore s
+    | MuG (_, _, t) -> waiting_rs roles_to_ignore t
+    | CallG (caller, _, roles, t) ->
+            let rs_set = Set.of_list (module RoleName) roles in
+            waiting_rs roles_to_ignore t |> add_to_set roles_to_ignore caller |> Set.union rs_set
+    | _ -> Set.empty(module RoleName)
+
+let rec generate_crash_branch (t: t) crashed_r waiting_rs = 
+    match t with
+        | MessageG (_, sender, receiver, t') ->
+            let continuation = generate_crash_branch t' crashed_r (Set.remove waiting_rs receiver) in
+            let sender_waiting = Set.mem waiting_rs sender and receiver_waiting = Set.mem waiting_rs receiver in
+            let sender_crashed = RoleName.equal sender crashed_r and receiver_crashed = RoleName.equal receiver crashed_r in
+            let label = if sender_crashed then "CRASH" else "EXIT" in
+            if ((not sender_waiting) && (not receiver_waiting)) || receiver_crashed
+                then continuation
+            else if (sender_crashed || not sender_waiting) && receiver_waiting 
+                then MessageG ({label = LabelName.of_string label; payload = []}, sender, receiver, continuation)
+            else 
+                uerr @@ UnawareOfCrash (sender, receiver)
+
+        | ChoiceG (_, choices) ->
+            (* with the assumption that every choice has a communication between sender and another role *)
+            ( match List.hd choices with
+                | Some (MessageG (msg, s, r, t)) -> generate_crash_branch (MessageG (msg, s, r, t)) crashed_r waiting_rs 
+                | _  -> unimpl ~here:[%here] "Generating crash behaviour in choice that does not start with a message" )
+
+        | MuG (tvar, el, t) -> MuG (tvar, el, generate_crash_branch t crashed_r waiting_rs) 
+        | CallG (caller, protocol, participants, t) -> CallG (caller, protocol, participants, generate_crash_branch t crashed_r waiting_rs)
+        | EndG -> EndG
+        | other_t -> other_t
+            
+
+(* add crash branch whenever communication from an unreliable role is found *)
+let rec add_crash_branches (gtype : t) reliable_rs = 
+    match gtype with
+        | MessageG (msg, sender, receiver, t) -> 
+            if Set.mem reliable_rs sender 
+            then MessageG (msg, sender, receiver, add_crash_branches t reliable_rs)
+            else
+                let roles_to_ignore = Set.of_list (module RoleName) [sender; receiver] in
+                let waiting_rs' = waiting_rs roles_to_ignore t in
+                ChoiceG(
+                sender,
+                [ MessageG ({ label = LabelName.of_string "CRASH"; payload = [] } 
+                            , sender 
+                            , receiver 
+                            , generate_crash_branch t sender waiting_rs')
+                ; MessageG (msg, sender, receiver, add_crash_branches t reliable_rs)] )
+
+        | ChoiceG (sender, choices) ->
+            (* with the assumption that every choice has a communication between sender and another role at the beginning *)
+            (* all branches generate the same crash behaviour, pick any one of them *)
+            (* in this implementation, the head of the list is picked *)
+            let some_branch = 
+                match List.hd choices with
+                    | None -> EndG
+                    | Some branch -> branch in
+            let receiver = get_first_receiver some_branch in
+            let roles_to_ignore = Set.of_list(module RoleName) [sender; receiver] in
+            let waiting_rs' = waiting_rs roles_to_ignore some_branch in
+            let crash_branch = generate_crash_branch some_branch sender waiting_rs' in 
+            ChoiceG(sender, crash_branch :: choices)
+
+        | MuG (tvar, el, t) -> MuG (tvar, el, add_crash_branches t reliable_rs)
+        | CallG (caller, protocol, participants, t) -> CallG (caller, protocol, participants, add_crash_branches t reliable_rs)
+        | EndG -> EndG
+        | other_t -> other_t
+
+
+(* introduce crash patterns to global protocols *)
+let graceful_failure (global_protocol : global_protocol) = 
+    let open! Syntax in
+    let gtype = of_protocol global_protocol in
+    let reliable_rs = global_protocol.value.split_roles.reliable_roles in
+    let set_reliable_rs =
+        List.fold
+            reliable_rs 
+            ~init: (Set.empty (module RoleName)) 
+            ~f: Set.add in
+    add_crash_branches gtype set_reliable_rs  

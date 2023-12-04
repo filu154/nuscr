@@ -106,6 +106,9 @@ val generate_fstar_code :
   scr_module -> protocol:ProtocolName.t -> role:RoleName.t -> string
 (** Generate F* code, with support for refinement types *)
 
+val graceful_failure : scr_module -> protocol:Names.ProtocolName.t -> Gtype.t
+(** Introduce crash behaviour folloing the graceful failure pattern*)
+
 module Pragma = Pragma
 module Expr = Expr
 module Gtype = Gtype
