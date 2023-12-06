@@ -109,6 +109,10 @@ val generate_fstar_code :
 val graceful_failure : scr_module -> protocol:Names.ProtocolName.t -> Gtype.t
 (** Introduce crash behaviour folloing the graceful failure pattern*)
 
+val local_graceful_failure :
+  scr_module -> protocol:Names.ProtocolName.t -> Gtype.t
+(** Introduce crash behaviour folloing the graceful failure pattern *)
+
 module Pragma = Pragma
 module Expr = Expr
 module Gtype = Gtype

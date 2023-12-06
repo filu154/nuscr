@@ -205,6 +205,18 @@ module Toplevel = struct
       | None -> uerr (ProtocolNotFound protocol)
     in
     Extraction.expand_global_protocol ast gp |> Gtype.graceful_failure
+
+  let local_graceful_failure ast ~protocol = 
+    let gp = 
+      match
+        List.find
+          ~f:(fun gt -> ProtocolName.equal gt.Loc.value.name protocol)
+          ast.protocols
+      with
+      | Some gp -> gp
+      | None -> uerr (ProtocolNotFound protocol)
+    in
+    Extraction.expand_global_protocol ast gp |> Gtype.local_graceful_failure
 end
 
 include Toplevel

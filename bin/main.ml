@@ -84,6 +84,7 @@ type global_action_verb =
   | ShowGlobalTypeSexp
   | ShowGlobalTypeProtobuf
   | GracefulFailure
+  | LocalGracefulFailure
 
 type local_action_verb =
   | Project
@@ -134,6 +135,9 @@ let main args global_actions local_actions =
               Nuscrlib.get_global_type_protobuf ~protocol ast |> print_string 
           | GracefulFailure ->
               let gtype = Nuscrlib.graceful_failure ~protocol ast in
+              Nuscrlib.Gtype.show gtype |> print_endline 
+          | LocalGracefulFailure -> 
+              let gtype = Nuscrlib.local_graceful_failure ~protocol ast in
               Nuscrlib.Gtype.show gtype |> print_endline )
         global_actions
     in
@@ -393,9 +397,18 @@ let graceful_failure =
   Arg.(
     value & opt_all string [] & info ["graceful-failure"] ~doc ~docv:"PROTO" )
 
+let local_graceful_failure = 
+  let doc = 
+    "Introduce crash behaviour following the local graceful failure pattern. \
+    <protocol_name>"
+  in 
+  Arg.(
+    value & opt_all string [] 
+    & info ["local-graceful-failure"] ~doc ~docv:"PROTO" )
+
 let mk_global_actions show_global_type show_global_type_mpstk
     show_global_type_tex show_global_type_sexp show_global_type_protobuf
-    graceful_failure =
+    graceful_failure local_graceful_failure =
   let show_global_type =
     List.map ~f:(fun p -> (ShowGlobalType, p)) show_global_type
   in
@@ -416,13 +429,17 @@ let mk_global_actions show_global_type show_global_type_mpstk
   let graceful_failure = 
     List.map ~f:(fun p -> (GracefulFailure, p)) graceful_failure 
   in
+  let local_graceful_failure = 
+      List.map ~f:(fun p -> (LocalGracefulFailure, p)) local_graceful_failure 
+  in
   List.concat
     [ show_global_type
     ; show_global_type_mpstk
     ; show_global_type_tex
     ; show_global_type_sexp
     ; show_global_type_protobuf
-    ; graceful_failure ]
+    ; graceful_failure 
+    ; local_graceful_failure ]
 
 let cmd =
   let doc =
@@ -449,7 +466,7 @@ let cmd =
     Term.(
       const mk_global_actions $ show_global_type $ show_global_type_mpstk
       $ show_global_type_tex $ sexp_global_type $ show_global_type_protobuf
-      $ graceful_failure )
+      $ graceful_failure $ local_graceful_failure )
   in
   let local_actions =
     Term.(

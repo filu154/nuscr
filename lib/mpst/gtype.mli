@@ -86,4 +86,7 @@ val validate_refinements_exn : t -> unit
     pragma *)
 
 val graceful_failure : global_protocol -> t
-(** Introduce crash behaviour folloing the graceful failure pattern*)
+(** Introduce crash behaviour folloing the graceful failure pattern *)
+
+val local_graceful_failure : global_protocol -> t
+(** Introduce crash behaviour folloing the local graceful failure pattern *)
