@@ -732,9 +732,5 @@ let graceful_failure (global_protocol : global_protocol) =
     let open! Syntax in
     let gtype = of_protocol global_protocol in
     let reliable_rs = global_protocol.value.split_roles.reliable_roles in
-    let set_reliable_rs =
-        List.fold
-            reliable_rs 
-            ~init: (Set.empty (module RoleName)) 
-            ~f: Set.add in
+    let set_reliable_rs = Set.of_list (module RoleName) reliable_rs in
     add_crash_branches gtype set_reliable_rs  
