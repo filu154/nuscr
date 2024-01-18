@@ -76,18 +76,27 @@ let pp_payloadt fmt p = Stdlib.Format.fprintf fmt "%s" (show_payloadt p)
 type role = 
     | Role of RoleName.t
     | ReliableRole of RoleName.t
+    | BackupRole of RoleName.t * RoleName.t
+    | Notifier of RoleName.t
 [@@deriving sexp_of]
 
 type roles = 
     { roles: RoleName.t list
     ; nested_roles: RoleName.t list
-    ; reliable_roles: RoleName.t list }
+    ; reliable_roles: RoleName.t list
+    ; notifier: RoleName.t option
+    (* list of pairs (role, backup of role)*)
+    ; backups_map : ( RoleName.t * RoleName.t) list } 
 [@@deriving show {with_path= false}, sexp_of]
 
 type message =
   | Message of {name: LabelName.t; payload: payloadt list}
   | MessageName of LabelName.t
 [@@deriving eq, ord]
+
+type labels = 
+    { label_backup: LabelName.t 
+    ; label_roles: LabelName.t }
 
 let show_message = function
   | Message {name; payload} ->

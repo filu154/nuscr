@@ -113,6 +113,10 @@ val local_graceful_failure :
   scr_module -> protocol:Names.ProtocolName.t -> Gtype.t
 (** Introduce crash behaviour folloing the graceful failure pattern *)
 
+val failover :
+  scr_module -> protocol:Names.ProtocolName.t -> Gtype.t
+(** Introduce crash behaviour folloing the failover pattern *)
+
 module Pragma = Pragma
 module Expr = Expr
 module Gtype = Gtype

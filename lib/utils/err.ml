@@ -43,6 +43,7 @@ type user_error =
   | StuckRefinement (* TODO: Extra Message for error reporting *)
   | UnguardedTypeVariable of TypeVariableName.t
   | UnawareOfCrash of RoleName.t * RoleName.t
+  | ReliabilityInformationLoss of RoleName.t * RoleName.t
 [@@deriving sexp_of]
 
 (** UserError is a user error and should be reported back so it can be fixed *)
@@ -144,7 +145,12 @@ let show_user_error = function
       sprintf "%s is not aware of the crash when sending message to %s at %s"
         (RoleName.user sender) (RoleName.user receiver)
         (Loc.show (RoleName.where sender))
-
+  | ReliabilityInformationLoss (sender, receiver) -> 
+      sprintf "%s's backup will get stuck in case %s crashes when sending a \
+      message about %s's state here %s \n \
+      Need to declare a reliable role as notifier"
+        (RoleName.user sender) (RoleName.user receiver) (RoleName.user sender)
+        (Loc.show (RoleName.where sender))
 let unimpl ~here desc = UnImplemented (desc, here) |> raise
 
 let uerr e = UserError e |> raise

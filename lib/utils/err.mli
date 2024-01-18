@@ -35,6 +35,7 @@ type user_error =
   | StuckRefinement (* TODO: Extra Message for error reporting *)
   | UnguardedTypeVariable of TypeVariableName.t
   | UnawareOfCrash of RoleName.t * RoleName.t
+  | ReliabilityInformationLoss of RoleName.t * RoleName.t
 [@@deriving sexp_of]
 
 (** UserError is a user error and should be reported back so it can be fixed *)

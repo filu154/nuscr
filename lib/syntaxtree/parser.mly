@@ -19,6 +19,7 @@
 %token LSQUARE
 %token RSQUARE
 %token ARROBA
+%token ASTER
 
 (* For expressions *)
 %token AMPAMP
@@ -42,6 +43,7 @@
 %token AUX_KW
 %token ROLE_KW
 %token RELIABLE_KW
+%token REPLACES_KW
 
 %token FROM_KW
 %token TO_KW
@@ -100,23 +102,43 @@ let raw_global_protocol_decl ==
   rs = role_decls ;
   ann = annotation? ; body = global_protocol_body ;
   {
-    (* used to split roles into reliable and unreliable roles *)
+    (* split roles into lists of 
+       unreliable roles,
+       reliable roles (including backups), 
+       list of pairs (role, backup of role) 
+       notifier *)
+    (*TODO: find a way to not have to convert from set to list
+        and then back to set again later
+        Current issue is that show can't be derived for Set*)
     let rec split_roles = function
-        | [] -> ([], [])
-        | (role :: roles) -> (
-            let (rs, reliable_rs) = split_roles roles in
+        | [] -> ( []
+                , []
+                , []
+                , Option.none) 
+        | (role :: roles) -> 
+            let (rs, reliable_rs, backups_map, n) = split_roles roles in
             match role with
-            | Role r -> (r :: rs, reliable_rs)
-            | ReliableRole r -> (rs, r :: reliable_rs) ) in 
+            | Role r -> (r :: rs, reliable_rs, backups_map, n)
+            | ReliableRole r -> (rs, r :: reliable_rs, backups_map, n) 
+            | BackupRole (b, r) -> ( r :: rs 
+                                   , b :: reliable_rs
+                                   , (r, b) :: backups_map 
+                                   , n ) 
+            | Notifier r -> ( rs
+                            , r :: reliable_rs 
+                            , backups_map
+                            , Option.some r ) in
     let nested_rs = [] in
-    let (rs', reliable_rs)= split_roles rs in 
+    let (rs', reliable_rs, backups_map, n)= split_roles rs in 
     let (nested_protos, ints) = body in
     { name = nm
-    ; roles = rs' @ nested_rs @ reliable_rs 
+    ; roles = rs' @ nested_rs @ reliable_rs
     ; split_roles = 
         { roles = rs'
         ; nested_roles = nested_rs
         ; reliable_roles = reliable_rs
+        ; notifier = n
+        ; backups_map = backups_map
         }
     ; nested_protocols = nested_protos
     ; interactions = ints
@@ -131,21 +153,37 @@ let raw_nested_protocol_decl ==
   rs = nested_role_decls ;
   ann = annotation? ; body = global_protocol_body ;
   {
-    (* used to split roles into reliable and unreliable roles *)
+    (* split roles into lists of 
+       unreliable roles,
+       reliable roles (including backups), 
+       list of pairs (role, backup of role) *)
     let rec split_roles = function
-        | [] -> ([], [])
-        | (role :: roles) -> (
-            let (rs, reliable_rs) = split_roles roles in
+        | [] -> ( []
+                , []
+                , []
+                , Option.none) 
+        | (role :: roles) -> 
+            let (rs, reliable_rs, backups_map, n) = split_roles roles in
             match role with
-            | Role r -> (r :: rs, reliable_rs)
-            | ReliableRole r -> (rs, r :: reliable_rs) ) 
+            | Role r -> (r :: rs, reliable_rs, backups_map, n)
+            | ReliableRole r -> (rs, r :: reliable_rs, backups_map, n) 
+            | BackupRole (b, r) -> ( r :: rs
+                                   , b :: reliable_rs
+                                   , (r, b) :: backups_map 
+                                   , n ) 
+            | Notifier r -> ( rs
+                            , r :: reliable_rs
+                            , backups_map
+                            , Option.some r ) 
     (* used to unpack role constructor from list of new roles *)
     and unpack_roles = function 
         | [] -> []
         | (Role r :: roles) -> r :: unpack_roles roles 
-        | (ReliableRole r :: roles) -> r :: unpack_roles roles in
+        | (ReliableRole r :: roles) -> r :: unpack_roles roles 
+        | (BackupRole (b, _) :: roles) -> b :: unpack_roles roles 
+        | (Notifier n :: roles) -> n :: unpack_roles roles in
     let (rs', nested_rs) = rs in
-    let (rs'', reliable_rs)= split_roles rs' in
+    let (rs'', reliable_rs, backups_map, n) = split_roles rs' in
     let unpacked_nrs = unpack_roles nested_rs in
     let (nested_protos, ints) = body in
     { name = nm
@@ -154,6 +192,8 @@ let raw_nested_protocol_decl ==
         { roles = rs''
         ; nested_roles = unpacked_nrs
         ; reliable_roles = reliable_rs
+        ; notifier = n
+        ; backups_map = backups_map
         }
     ; nested_protocols = nested_protos
     ; interactions = ints
@@ -177,6 +217,8 @@ let nested_role_decls == LPAR ; nms = separated_nonempty_list(COMMA, role_decl) 
 let role_decl == 
     | ROLE_KW ; nm = rolename ; { Role (nm) } 
     | RELIABLE_KW ; ROLE_KW ; nm = rolename ; { ReliableRole (nm) } 
+    | RELIABLE_KW ; ASTER ; nm = rolename ; { Notifier (nm) }
+    | ROLE_KW ; nm1 = rolename ; REPLACES_KW ; nm2 = rolename ; { BackupRole (nm1, nm2)} 
 
 let new_role_decls == SEMICOLON ; NEW_KW ;
                       nms = separated_nonempty_list(COMMA, role_decl) ; { nms }

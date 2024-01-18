@@ -89,6 +89,7 @@ and token lexbuf =
   | '[' -> LSQUARE
   | ']' -> RSQUARE
   | '@' -> ARROBA
+  | '*' -> ASTER
   (* keywords *)
   | "not" -> NOT_KW
   | "true" -> TRUE_KW
@@ -99,6 +100,7 @@ and token lexbuf =
   | "aux" -> AUX_KW
   | "role" -> ROLE_KW
   | "reliable" -> RELIABLE_KW
+  | "replaces" -> REPLACES_KW
   | "from" -> FROM_KW
   | "to" -> TO_KW
   | "choice" -> CHOICE_KW

@@ -38,12 +38,17 @@ type payloadt =
 type role = 
     | Role of RoleName.t
     | ReliableRole of RoleName.t
+    | BackupRole of RoleName.t * RoleName.t
+    | Notifier of RoleName.t 
 [@@deriving sexp_of]
 
 type roles = 
     { roles: RoleName.t list
     ; nested_roles: RoleName.t list
-    ; reliable_roles: RoleName.t list }
+    ; reliable_roles: RoleName.t list
+    ; notifier: RoleName.t option
+    (* list of pairs (role, backup of role)*)
+    ; backups_map: ( RoleName.t * RoleName.t ) list }
 [@@deriving sexp_of]
 
 type message =

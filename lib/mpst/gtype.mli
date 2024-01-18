@@ -90,3 +90,6 @@ val graceful_failure : global_protocol -> t
 
 val local_graceful_failure : global_protocol -> t
 (** Introduce crash behaviour folloing the local graceful failure pattern *)
+
+val failover : global_protocol -> t
+(** Introduce crash behaviour following the failover pattern *)
