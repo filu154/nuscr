@@ -94,10 +94,6 @@ type message =
   | MessageName of LabelName.t
 [@@deriving eq, ord]
 
-type labels = 
-    { label_backup: LabelName.t 
-    ; label_roles: LabelName.t }
-
 let show_message = function
   | Message {name; payload} ->
       sprintf "%s(%s)" (LabelName.user name)

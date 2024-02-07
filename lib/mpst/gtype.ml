@@ -108,7 +108,7 @@ module Formatting = struct
         pp_print_string ppf (TypeVariableName.user n) ;
         pp_print_string ppf rec_exprs_s ;
         pp_print_string ppf ";"
-    | EndG -> pp_print_string ppf "(end)"
+    | EndG -> pp_print_string ppf "" (*TODO: This was (end) before*)
     | ChoiceG (r, gs) ->
         pp_print_string ppf "choice at " ;
         pp_print_string ppf (RoleName.user r) ;
@@ -710,8 +710,8 @@ let rec generate_crash_branch allow_local (t: t) crashed_r waiting_rs =
             let receiver_crashed = RoleName.equal receiver crashed_r in
             let label = if sender_crashed then "CRASH" else "EXIT" in
 
-            let skip_communication = 
-                ((not sender_waiting) && (not receiver_waiting)) || receiver_crashed in
+            let skip_communication = ((not sender_waiting) && (not receiver_waiting)) 
+                                    || (receiver_crashed && not sender_waiting) in
             let notify = (sender_crashed || not sender_waiting) && receiver_waiting in
 
             if skip_communication 
@@ -729,15 +729,21 @@ let rec generate_crash_branch allow_local (t: t) crashed_r waiting_rs =
             else
                 uerr @@ UnawareOfCrash (sender, receiver)
 
-        | ChoiceG (_, choices) ->
+        | ChoiceG (p, choices) ->
             (* with the assumption that every choice has a communication between sender and another role *)
-            ( match List.hd choices with
-                | Some (MessageG (msg, s, r, t)) -> 
-                        let msg_g = MessageG (msg, s, r, t) in
+            if RoleName.equal p crashed_r || not allow_local
+            then 
+                match List.hd choices with
+                | Some (MessageG (m, s, r, t)) ->
+                        let msg_g = MessageG (m, s, r, t) in
                         generate_crash_branch allow_local msg_g crashed_r waiting_rs 
-                | _  -> unimpl ~here:[%here] 
+                | _ -> unimpl ~here:[%here] 
                 "Generating crash behaviour in choice that \ 
-                does not start with a message" )
+                does not start with a message" 
+            else 
+                ChoiceG ( p
+                        , List.map choices
+                            ~f: (fun ch -> generate_crash_branch allow_local ch crashed_r waiting_rs))
 
         | MuG (tvar, el, t) -> 
                 MuG ( tvar
@@ -863,7 +869,7 @@ let rec replace crashed_rs backups = function
     | EndG -> EndG
     | other_t -> other_t
 
-let rec notify q waiting_rs label init = 
+let rec _notify q waiting_rs label init = 
     Set.fold
         ~f: (fun accum r -> 
         let m = 
@@ -872,6 +878,45 @@ let rec notify q waiting_rs label init =
         ~init: init 
         waiting_rs 
 
+let rec find_notifiers notif backups rel_rs = function
+    | MessageG (_, p, q, t) ->
+            let notifiers = find_notifiers notif backups rel_rs t in
+            if Map.mem backups p
+            then
+            (* p is unreliable so we need to check if q is
+             its corresponding notifier *)
+                if Set.mem (senders t) p
+                then find_notifiers notif backups rel_rs t
+                else 
+                    let notif' = 
+                        if Set.mem rel_rs q 
+                        then q 
+                        else match notif with 
+                            | None -> uerr @@ ReliabilityInformationLoss (p, q)
+                            | Some n -> n
+                        in
+                    Map.update notifiers p 
+                        ~f: (fun v -> match v with |_ -> notif')
+            else 
+                notifiers
+
+    | ChoiceG (p, choices) ->
+            let (candidate_notif, notifiers) = 
+                match List.hd choices with
+                | Some (MessageG (_, _, q, t)) -> 
+                        (q, find_notifiers notif backups rel_rs t)
+                | _ -> (p, Map.empty (module RoleName)) (*this will never be taken*) in
+            if Map.mem backups p then 
+                if Set.mem rel_rs candidate_notif
+                then Map.update notifiers p 
+                        ~f: (fun v -> match v with |_ -> candidate_notif)
+                else notifiers
+            else
+                notifiers
+
+    | MuG (_, _, t) -> find_notifiers notif backups rel_rs t
+    | CallG (_, _, _, t) -> find_notifiers notif backups rel_rs t
+    | _ -> Map.empty (module RoleName)
 
 (*TODO: Think how to group parameters, function calls are too long*)
 (*Or maybe just have labeled arguments to make it clear and also format code nicer*)
@@ -880,7 +925,6 @@ let rec add_failover_branches
     ~crashed_rs: crashed_rs 
     ~handled_rs: handled_rs
     ~backups: backups 
-    ~notif: notif
     ~notifiers: notifiers (* mapping from an unreliable role with
                             a backup to its corresponding notifier
                             i.e either last role that received 
@@ -892,27 +936,27 @@ let rec add_failover_branches
                            crashed roles *)
     = function
     | MessageG (m, p, q, t) -> 
-        let p_crashed = Map.mem crashed_rs p in
-        let q_crashed = Map.mem notifiers q in
+        let p_crashed = Set.mem crashed_rs p in
+        let q_crashed = Set.mem crashed_rs q in
         let p_reliable = Set.mem rel_rs p in
-        let q_reliable = Set.mem rel_rs q in
         let p_handled = Set.mem handled_rs p in
 
         let p_unrel_no_bckup = not p_reliable && not (Map.mem backups p) in
 
-        if q_crashed
-        (*TODO: this should also check if p is aware of q's crash*)
+        if q_crashed && 
+            ( match Map.find aware_of_rs p with
+                | None -> false
+                | Some rs -> Set.mem rs q )
         then
             add_failover_branches 
-                    ~rel_rs: rel_rs
-                    ~crashed_rs: crashed_rs
-                    ~handled_rs: handled_rs
-                    ~backups: backups
-                    ~notif: notif
-                    ~notifiers: notifiers
-                    ~aware_of_rs: aware_of_rs
-                    ~glb_prot: glb_prot
-                    t
+                                ~rel_rs: rel_rs
+                                ~crashed_rs: crashed_rs
+                                ~handled_rs: handled_rs
+                                ~backups: backups
+                                ~notifiers: notifiers
+                                ~aware_of_rs: aware_of_rs
+                                ~glb_prot: glb_prot
+                                t 
 
         else if p_unrel_no_bckup && not p_handled
         then
@@ -925,7 +969,6 @@ let rec add_failover_branches
                             ~crashed_rs: crashed_rs
                             ~handled_rs: handled_rs'
                             ~backups: backups
-                            ~notif: notif
                             ~notifiers: notifiers 
                             ~aware_of_rs: aware_of_rs
                             ~glb_prot: glb_prot
@@ -952,7 +995,6 @@ let rec add_failover_branches
                                 ~crashed_rs: crashed_rs
                                 ~handled_rs: handled_rs
                                 ~backups: backups
-                                ~notif: notif
                                 ~notifiers: notifiers
                                 ~aware_of_rs: aware_of_rs
                                 ~glb_prot: glb_prot
@@ -968,7 +1010,6 @@ let rec add_failover_branches
                         ~crashed_rs: crashed_rs
                         ~handled_rs: handled_rs
                         ~backups: backups
-                        ~notif: notif
                         ~notifiers: notifiers
                         ~aware_of_rs: aware_of_rs
                         ~glb_prot: glb_prot
@@ -976,7 +1017,17 @@ let rec add_failover_branches
 
         else if p_reliable
         then
-            let p_aware_of = 
+            MessageG (m, p, q, add_failover_branches 
+                                    ~rel_rs: rel_rs
+                                    ~crashed_rs: crashed_rs
+                                    ~handled_rs: handled_rs
+                                    ~backups: backups
+                                    ~notifiers: notifiers
+                                    ~aware_of_rs: aware_of_rs
+                                    ~glb_prot: glb_prot
+                                    t)
+
+            (* let p_aware_of = 
                 match Map.find aware_of_rs p with
                 | Some rs -> rs
                 | None -> Set.empty (module RoleName) in
@@ -996,7 +1047,6 @@ let rec add_failover_branches
                                 ~crashed_rs: crashed_rs
                                 ~handled_rs: handled_rs
                                 ~backups: backups
-                                ~notif: notif
                                 ~notifiers: notifiers
                                 ~aware_of_rs: aware_of_rs'
                                 ~glb_prot: glb_prot
@@ -1009,21 +1059,16 @@ let rec add_failover_branches
                 let label = 
                     Set.fold
                         ~f: (fun accum r -> accum ^ RoleName.user r)
-                        ~init: "CRASHED-"
+                        ~init: "CRASHED"
                         notify_about_rs in
                 let crash_m = { label = 
                                    LabelName.of_string label
                                ; payload =
                                    [] } in
-                MessageG (crash_m, p, q, cont)
+                MessageG (crash_m, p, q, cont) *) 
         else
 
         let senders = senders t in
-        let b = 
-            match Map.find backups p with
-            | Some b' -> b'
-            | None -> p (* this branch will never be taken*)
-        in
 
         if not (Set.mem senders p)
         then
@@ -1031,10 +1076,10 @@ let rec add_failover_branches
             (*notifier is required to send message to backup 
         and notify all unaware roles*)
             then
-                (* let aware_of_p = 
+                let aware_of_p = 
                     match Map.find aware_of_rs q with
                     | Some rs -> Set.mem rs p
-                    | None -> false in *)
+                    | None -> false in 
                 let aware_of_rs' = 
                     Map.update aware_of_rs q 
                         ~f: (fun v -> match v with
@@ -1046,103 +1091,38 @@ let rec add_failover_branches
                                ; payload =
                                    [] } 
                 in 
-                let cont = add_failover_branches 
+                let cont' = 
+                    match Map.find notifiers p with
+                    | None -> 
+                        uerr @@ ReliabilityInformationLoss (p, q)
+                    | Some n ->  
+                        if RoleName.equal n q 
+                        then
+                        (* q is reliable and saved as notifier for p *)
+                            add_failover_branches 
                                     ~rel_rs: rel_rs
                                     ~crashed_rs: crashed_rs
                                     ~handled_rs: handled_rs
                                     ~backups: backups
-                                    ~notif: notif
-                                    ~notifiers: notifiers
-                                    ~aware_of_rs: aware_of_rs'
-                                    ~glb_prot: glb_prot 
-                                    t in
-                match Map.find notifiers p with
-                | None -> 
-                (*that means declared notifier must be used*)
-                ( match notif with
-                        | Some n ->
-                            (* if aware_of_p
-                            then use_notifier
-                            else MessageG(crash_m, p, q, use_notifier) *)
-                            let aware_of_p = 
-                                match Map.find aware_of_rs n with
-                                | Some rs -> Set.mem rs p
-                                | None -> false in
-                            if aware_of_p
-                            then cont
-                            else MessageG(crash_m, p, n, cont)
-                    | None ->
-                        uerr @@ ReliabilityInformationLoss (p, q) )
-                | Some r -> 
-                if q_reliable
-                then
-                    (* let crashed_rs_notif' = 
-                        Map.update notifiers p 
-                        ~f: (fun v -> match v with | _ -> q ) in *)
-                    let cont = add_failover_branches 
-                                    ~rel_rs: rel_rs
-                                    ~crashed_rs: crashed_rs
-                                    ~handled_rs: handled_rs
-                                    ~backups: backups
-                                    ~notif: notif
                                     ~notifiers: notifiers 
                                     ~aware_of_rs: aware_of_rs'
                                     ~glb_prot: glb_prot
-                                    t in
-                    (* let notified_rs = 
-                        Map.fold aware_of_rs' 
-                            ~init: (Set.empty (module RoleName))
-                            ~f: (fun ~key:k ~data:rs acc -> 
-                                if Set.mem rs p then Set.add acc k else acc) 
-                    in 
-                    let not_aware_rs = 
-                        participants glb_prot
-                        |> flip Set.diff notified_rs
-                        |> flip Set.diff crashed_rs in
-                    let label = "CRASHED-" ^ RoleName.user p in
-                    (*q can be used as notifier*) 
-                    let notify_rs = notify q not_aware_rs label cont in 
-                    let backup_m = { label = 
-                                       LabelName.of_string "START"
-                                   ; payload =
-                                       [] } in *)
-                    
-                    if aware_of_p
-                    then
-                       (* MessageG (backup_m, q, b, notify_rs) *)
-                        cont
-                    else 
-                        (* MessageG (crash_m, p, q,
-                            MessageG(backup_m, q , b , notify_rs)) *)
-                        MessageG (crash_m, p, q, cont)
-                else
-                    match notif with 
-                    | Some n ->
-                        let crashed_rs_notif' = 
-                            Map.update crashed_rs_notif p 
-                            ~f: (fun v -> match v with | _ -> n ) in
-                        (* let use_notifier = *)
-                        let cont = 
-                            (* MessageG (crash_m, p, n, t) |> *)
-                                add_failover_branches 
-                                    ~rel_rs: rel_rs
-                                    ~crashed_rs: crashed_rs
-                                    ~handled_rs: handled_rs
-                                    ~backups: backups
-                                    ~notif: notif
-                                    ~crashed_rs_notif: crashed_rs_notif'
-                                    ~aware_of_rs: aware_of_rs'
-                                    ~glb_prot: glb_prot 
-                                    t in
-                        (* if aware_of_p
-                        then use_notifier
-                        else MessageG(crash_m, p, q, use_notifier) *)
-                        if aware_of_p
-                        then cont
-                        else MessageG(crash_m, p, q, cont)
-
-                    | None ->
-                        uerr @@ ReliabilityInformationLoss (p, q)
+                                    t 
+                        else 
+                            MessageG (crash_m, p, n, t)
+                            |> add_failover_branches 
+                                        ~rel_rs: rel_rs
+                                        ~crashed_rs: crashed_rs
+                                        ~handled_rs: handled_rs
+                                        ~backups: backups
+                                        ~notifiers: notifiers
+                                        ~aware_of_rs: aware_of_rs'
+                                        ~glb_prot: glb_prot in
+                if aware_of_p
+                then
+                    cont'
+                else 
+                    MessageG (crash_m, p, q, cont')
 
             else 
                 let crash_branch = 
@@ -1159,21 +1139,53 @@ let rec add_failover_branches
                         ~crashed_rs: crashed_rs'
                         ~handled_rs: handled_rs
                         ~backups: backups
-                        ~notif: notif
+                        ~notifiers: notifiers
                         ~aware_of_rs: aware_of_rs
                         ~glb_prot: glb_prot  in
 
                 let noncrash_branch = 
-                    if q_reliable
+                    let cont = 
+                        match Map.find notifiers p with
+                        | None -> uerr @@ ReliabilityInformationLoss (p, q)
+                        | Some n ->  
+                            if RoleName.equal q n
+                            then
+                                (* q is reliable and saved as notifier for p *)
+                                add_failover_branches 
+                                        ~rel_rs: rel_rs
+                                        ~crashed_rs: crashed_rs
+                                        ~handled_rs: handled_rs
+                                        ~backups: backups
+                                        ~notifiers: notifiers 
+                                        ~aware_of_rs: aware_of_rs
+                                        ~glb_prot: glb_prot
+                                        t 
+                            else 
+                            let notif_m = { label = 
+                                               LabelName.of_string "DUMMY"
+                                           ; payload =
+                                               [] } in
+                            MessageG (notif_m, p, n, t)
+                            |> add_failover_branches 
+                                        ~rel_rs: rel_rs
+                                        ~crashed_rs: crashed_rs
+                                        ~handled_rs: handled_rs
+                                        ~backups: backups
+                                        ~notifiers: notifiers
+                                        ~aware_of_rs: aware_of_rs
+                                        ~glb_prot: glb_prot in
+                    MessageG (m, p, q, cont) 
+                in
+                ChoiceG (p, [noncrash_branch ; crash_branch])
+                    (* if q_reliable
                     then
-                    (*TODO: remove p as key from waiting_rs *)
                     let cont = add_failover_branches 
                                     ~rel_rs: rel_rs
                                     ~crashed_rs: crashed_rs
                                     ~handled_rs: handled_rs
                                     ~backups: backups
                                     ~notif: notif
-                                    ~crashed_rs_notif: crashed_rs_notif
+                                    ~notifiers: notifiers
                                     ~aware_of_rs: aware_of_rs
                                     ~glb_prot: glb_prot
                                     t in
@@ -1210,9 +1222,8 @@ let rec add_failover_branches
                                         ~glb_prot: glb_prot in
                             MessageG(m, p, q, use_notifier)
                         | None ->
-                            uerr @@ ReliabilityInformationLoss (p, q)
-                    in
-                    ChoiceG (p, [noncrash_branch ; crash_branch])
+                            uerr @@ ReliabilityInformationLoss (p, q) *)
+                    (* ChoiceG (p, [noncrash_branch ; crash_branch]) *)
             else
                 if p_crashed
                 then
@@ -1221,6 +1232,7 @@ let rec add_failover_branches
                             ~f: (fun v -> match v with
                                 | Some rs -> Set.add rs p
                                 | None -> Set.singleton (module RoleName) p) 
+                    (*TODO: test if you need to check here if q is already aware of p*)
                     in
                     MessageG ( { label = 
                                    LabelName.of_string "CRASH"
@@ -1233,7 +1245,7 @@ let rec add_failover_branches
                                         ~crashed_rs: crashed_rs
                                         ~handled_rs: handled_rs
                                         ~backups: backups
-                                        ~notif: notif
+                                        ~notifiers: notifiers
                                         ~aware_of_rs: aware_of_rs'
                                         ~glb_prot: glb_prot 
                                         t ) 
@@ -1257,7 +1269,7 @@ let rec add_failover_branches
                                             ~crashed_rs: crashed_rs'
                                             ~handled_rs: handled_rs
                                             ~backups: backups
-                                            ~notif: notif
+                                            ~notifiers: notifiers
                                             ~aware_of_rs: aware_of_rs'
                                             ~glb_prot: glb_prot 
                                             t ) in
@@ -1268,7 +1280,7 @@ let rec add_failover_branches
                                             ~crashed_rs: crashed_rs
                                             ~handled_rs: handled_rs
                                             ~backups: backups
-                                            ~notif: notif
+                                            ~notifiers: notifiers
                                             ~aware_of_rs: aware_of_rs
                                             ~glb_prot: glb_prot 
                                             t ) in
@@ -1285,7 +1297,7 @@ let rec add_failover_branches
                                         ~handled_rs: handled_rs
                                         ~backups: backups
                                         ~aware_of_rs: aware_of_rs
-                                        ~notif: notif
+                                        ~notifiers: notifiers
                                         ~glb_prot: glb_prot)
                                 ch )
                 choices in
@@ -1320,28 +1332,115 @@ let rec add_failover_branches
                                         ~handled_rs: handled_rs
                                         ~backups: backups
                                         ~aware_of_rs: aware_of_rs'
-                                        ~notif: notif
+                                        ~notifiers: notifiers
                                         ~glb_prot: glb_prot
                                         some_branch in
             ChoiceG (p, crash_branch :: extended_choices) 
 
     | EndG ->
         if Set.is_empty crashed_rs
-        then EndG
+        then 
+            (* protocol ended with no new crashes, 
+               so notify all unused backups *)
+            let backup_m = { label = 
+                                LabelName.of_string "SAFE"
+                           ; payload = 
+                               [] } in
+            (* go over all pairs of (role, notifier) and
+               if role is not crashed, notify its backup *)
+            let notify_backups = 
+                Map.fold notifiers
+                    ~init: EndG
+                    ~f:(fun ~key: p ~data: n accum ->
+                        if Set.mem handled_rs p
+                        then accum
+                        else 
+                            match Map.find backups p with 
+                            | None -> EndG (*this branch will never be taken*)
+                            | Some b -> MessageG (backup_m, n, b, accum)) in
+            (*set of unreliable roles with backups that did not crash*)
+            let notify_about = Map.keys backups 
+                            |> Set.of_list (module RoleName) 
+                            |> flip Set.diff handled_rs 
+            in
+            let pt = participants glb_prot in 
+            Set.fold notify_about
+                ~init: notify_backups
+                ~f: (fun accum p -> 
+                    match Map.find notifiers p with
+                    | None -> EndG (*this branch will never be taken*)
+                    | Some n -> 
+                        (*notify all roles that r did not crash*)
+                        let m = { label = 
+                                    LabelName.of_string ("SAFE" ^ RoleName.user p)
+                                ; payload = 
+                                    [] } in
+                        let to_notify = Set.remove pt p |> flip Set.remove n in
+                        Set.fold to_notify
+                            ~init: accum
+                            ~f: (fun accum' r -> MessageG(m, n, r, accum')))
+
         else 
             let glb_prot' = replace crashed_rs backups glb_prot in
+            let pt = participants glb_prot' in
             let handled_rs' = Set.union handled_rs crashed_rs in
             let crashed_rs' = Set.empty (module RoleName) in
             let aware_of_rs' = Map.empty (module RoleName) in
+            let restart = 
                     add_failover_branches 
                         ~rel_rs: rel_rs
                         ~crashed_rs: crashed_rs'
                         ~handled_rs: handled_rs'
                         ~backups: backups
                         ~aware_of_rs: aware_of_rs'
-                        ~notif: notif
+                        ~notifiers: notifiers
                         ~glb_prot: glb_prot'
                         glb_prot'
+            in
+            (* let notify_about_crashes = *)
+                Set.fold crashed_rs 
+                    ~init: restart
+                    ~f: (fun accum p -> 
+                    match Map.find notifiers p with 
+                    (*issue is here because if dummy message is added by 
+                     algorithm, then this will be (None, Some b)
+                     UPDATE: this was probably solved*)
+                    | Some n -> 
+                        (*find all roles that are unaware of p's crash*)
+                        (* let aware_of_crash = 
+                            Map.fold aware_of_rs
+                            ~init: (Set.empty (module RoleName))
+                            ~f: (fun ~key:r ~data:rs accum' -> 
+                                if Set.mem rs p
+                                then Set.add accum' r
+                                else accum') 
+                        in
+                        let unaware_of_crash = Set.diff pt aware_of_crash in *)
+                        let aware_of_crash = Set.of_list (module RoleName) [p; n] in
+                        let unaware_of_crash = Set.diff pt aware_of_crash in
+                        (*use notifier to make unaware roles aware of p's crash*)
+                        let m = { label = 
+                                    LabelName.of_string ("CRASHED" ^ RoleName.user p)
+                                ; payload = 
+                                    [] } in
+                        Set.fold unaware_of_crash
+                            ~init: accum
+                            ~f: (fun accum' r -> MessageG (m, n, r, accum'))
+                    | None -> EndG (*this branch will never be taken*) ) 
+            (* in
+            (* send start messages to backups of roles that crashed 
+               since last restart *)
+            let backup_m = { label = 
+                                LabelName.of_string "START"
+                           ; payload = 
+                               [] } in
+            Set.fold crashed_rs
+                ~init: notify_about_crashes
+                ~f: (fun accum p -> 
+                match (Map.find notifiers p, Map.find backups p) with
+                | (Some n, Some b)  ->
+                    MessageG (backup_m, n, b, accum)
+                | _ -> EndG ) (*this branch will never be taken*) *)
 
     | MuG (tvar, el, t) -> 
             MuG ( tvar
@@ -1352,7 +1451,7 @@ let rec add_failover_branches
                             ~handled_rs: handled_rs
                             ~backups: backups
                             ~aware_of_rs: aware_of_rs
-                            ~notif: notif
+                            ~notifiers: notifiers
                             ~glb_prot: glb_prot
                             t ) 
 
@@ -1366,7 +1465,7 @@ let rec add_failover_branches
                             ~handled_rs: handled_rs
                             ~backups: backups
                             ~aware_of_rs: aware_of_rs
-                            ~notif: notif
+                            ~notifiers: notifiers
                             ~glb_prot: glb_prot
                             t ) 
     | _ -> EndG
@@ -1384,16 +1483,16 @@ let failover (global_protocol : global_protocol) =
         | `Ok bckps -> bckps
         (*TODO: raise error for duplicate*)
         | `Duplicate_key _  -> Map.empty(module RoleName) in
+    let notifiers = find_notifiers notifier backups rel_rs gtype in
     let crashed_rs = Set.empty (module RoleName) in
     let aware_of_rs = Map.empty (module RoleName) in
     let handled_rs = Set.empty (module RoleName) in
-    (*add failover behaviour for roles with backups*)
     add_failover_branches 
             ~rel_rs: rel_rs
             ~crashed_rs: crashed_rs
             ~handled_rs: handled_rs
             ~backups: backups
             ~aware_of_rs: aware_of_rs
-            ~notif: notifier
+            ~notifiers: notifiers
             ~glb_prot: gtype
             gtype
