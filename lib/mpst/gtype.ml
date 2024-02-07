@@ -710,8 +710,8 @@ let rec generate_crash_branch allow_local (t: t) crashed_r waiting_rs =
             let receiver_crashed = RoleName.equal receiver crashed_r in
             let label = if sender_crashed then "CRASH" else "EXIT" in
 
-            let skip_communication = 
-                ((not sender_waiting) && (not receiver_waiting)) || receiver_crashed in
+            let skip_communication = ((not sender_waiting) && (not receiver_waiting)) 
+                                    || (receiver_crashed && not sender_waiting) in
             let notify = (sender_crashed || not sender_waiting) && receiver_waiting in
 
             if skip_communication 
@@ -729,15 +729,21 @@ let rec generate_crash_branch allow_local (t: t) crashed_r waiting_rs =
             else
                 uerr @@ UnawareOfCrash (sender, receiver)
 
-        | ChoiceG (_, choices) ->
+        | ChoiceG (p, choices) ->
             (* with the assumption that every choice has a communication between sender and another role *)
-            ( match List.hd choices with
-                | Some (MessageG (msg, s, r, t)) -> 
-                        let msg_g = MessageG (msg, s, r, t) in
+            if RoleName.equal p crashed_r || not allow_local
+            then 
+                match List.hd choices with
+                | Some (MessageG (m, s, r, t)) ->
+                        let msg_g = MessageG (m, s, r, t) in
                         generate_crash_branch allow_local msg_g crashed_r waiting_rs 
-                | _  -> unimpl ~here:[%here] 
+                | _ -> unimpl ~here:[%here] 
                 "Generating crash behaviour in choice that \ 
-                does not start with a message" )
+                does not start with a message" 
+            else 
+                ChoiceG ( p
+                        , List.map choices
+                            ~f: (fun ch -> generate_crash_branch allow_local ch crashed_r waiting_rs))
 
         | MuG (tvar, el, t) -> 
                 MuG ( tvar
