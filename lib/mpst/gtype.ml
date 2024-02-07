@@ -906,8 +906,9 @@ let rec add_failover_branches
 
         let p_unrel_no_bckup = not p_reliable && not (Map.mem backups p) in
 
-        if q_crashed
-        (*TODO: this should also check if p is aware of q's crash*)
+        if q_crashed && ( match Map.find aware_of_rs p with
+                            | None -> false
+                            | Some rs -> Set.mem rs q )
         then
             add_failover_branches 
                     ~rel_rs: rel_rs
