@@ -983,6 +983,7 @@ let rec add_failover_branches
 
         else if p_reliable
         then
+        (*
             let p_aware_of = 
                 match Map.find aware_of_rs p with
                 | Some rs -> rs
@@ -1010,9 +1011,20 @@ let rec add_failover_branches
                                 t)
             in
             if Set.is_empty notify_about_rs 
-            then 
-                cont
-            else
+            then *)
+                MessageG (m, p, q, 
+                            add_failover_branches 
+                                ~rel_rs: rel_rs
+                                ~crashed_rs: crashed_rs
+                                ~handled_rs: handled_rs
+                                ~backups: backups
+                                ~notif: notif
+                                ~notifiers: notifiers
+                                ~aware_of_rs: aware_of_rs
+                                ~glb_prot: glb_prot
+                                t)
+
+            (* else
                 let label = 
                     Set.fold
                         ~f: (fun accum r -> accum ^ RoleName.user r)
@@ -1022,7 +1034,7 @@ let rec add_failover_branches
                                    LabelName.of_string label
                                ; payload =
                                    [] } in
-                MessageG (crash_m, p, q, cont)
+                MessageG (crash_m, p, q, cont) *)
         else
 
         let senders = senders t in
@@ -1038,10 +1050,10 @@ let rec add_failover_branches
             (*notifier is required to send message to backup 
         and notify all unaware roles*)
             then
-                (* let aware_of_p = 
+                let aware_of_p = 
                     match Map.find aware_of_rs q with
                     | Some rs -> Set.mem rs p
-                    | None -> false in *)
+                    | None -> false in 
                 let aware_of_rs' = 
                     Map.update aware_of_rs q 
                         ~f: (fun v -> match v with
