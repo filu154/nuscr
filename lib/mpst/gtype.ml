@@ -108,7 +108,7 @@ module Formatting = struct
         pp_print_string ppf (TypeVariableName.user n) ;
         pp_print_string ppf rec_exprs_s ;
         pp_print_string ppf ";"
-    | EndG -> pp_print_string ppf "(end)"
+    | EndG -> pp_print_string ppf ""
     | ChoiceG (r, gs) ->
         pp_print_string ppf "choice at " ;
         pp_print_string ppf (RoleName.user r) ;
@@ -879,6 +879,46 @@ let rec notify q waiting_rs label init =
         waiting_rs 
 
 
+let rec find_notifiers notif backups rel_rs = function
+    | MessageG (_, p, q, t) ->
+            let notifiers = find_notifiers notif backups rel_rs t in
+            if Map.mem backups p
+            then
+            (* p is unreliable so we need to check if q is
+             its corresponding notifier *)
+                if Set.mem (senders t) p
+                then find_notifiers notif backups rel_rs t
+                else 
+                    let notif' = 
+                        if Set.mem rel_rs q 
+                        then q 
+                        else match notif with 
+                            | None -> uerr @@ ReliabilityInformationLoss (p, q)
+                            | Some n -> n
+                        in
+                    Map.update notifiers p 
+                        ~f: (fun v -> match v with |_ -> notif')
+            else 
+                notifiers
+
+    | ChoiceG (p, choices) ->
+            let (candidate_notif, notifiers) = 
+                match List.hd choices with
+                | Some (MessageG (_, _, q, t)) -> 
+                        (q, find_notifiers notif backups rel_rs t)
+                | _ -> (p, Map.empty (module RoleName)) (*this will never be taken*) in
+            if Map.mem backups p then 
+                if Set.mem rel_rs candidate_notif
+                then Map.update notifiers p 
+                        ~f: (fun v -> match v with |_ -> candidate_notif)
+                else notifiers
+            else
+                notifiers
+
+    | MuG (_, _, t) -> find_notifiers notif backups rel_rs t
+    | CallG (_, _, _, t) -> find_notifiers notif backups rel_rs t
+    | _ -> Map.empty (module RoleName)
+
 (*TODO: Think how to group parameters, function calls are too long*)
 (*Or maybe just have labeled arguments to make it clear and also format code nicer*)
 let rec add_failover_branches 
@@ -900,7 +940,6 @@ let rec add_failover_branches
         let p_crashed = Set.mem crashed_rs p in
         let q_crashed = Map.mem notifiers q in
         let p_reliable = Set.mem rel_rs p in
-        let q_reliable = Set.mem rel_rs q in
         let p_handled = Set.mem handled_rs p in
 
         let p_unrel_no_bckup = not p_reliable && not (Map.mem backups p) in
@@ -1194,15 +1233,18 @@ let rec add_failover_branches
                                                LabelName.of_string "DUMMY"
                                            ; payload =
                                                [] } in
-                            MessageG (notif_m, p, n, t)
-                            |> add_failover_branches 
-                                        ~rel_rs: rel_rs
-                                        ~crashed_rs: crashed_rs
-                                        ~handled_rs: handled_rs
-                                        ~backups: backups
-                                        ~notifiers: notifiers
-                                        ~aware_of_rs: aware_of_rs
-                                        ~glb_prot: glb_prot )
+                            let use_notifier = 
+                                MessageG (notif_m, p, n, t)
+                                |> add_failover_branches 
+                                            ~rel_rs: rel_rs
+                                            ~crashed_rs: crashed_rs
+                                            ~handled_rs: handled_rs
+                                            ~backups: backups
+                                            ~notifiers: notifiers
+                                            ~aware_of_rs: aware_of_rs
+                                            ~glb_prot: glb_prot 
+                            in
+                                MessageG (m, p, q, use_notifier) )
                             in
                     ChoiceG(p, [noncrash_branch ; crash_branch])
             else
@@ -1376,6 +1418,7 @@ let failover (global_protocol : global_protocol) =
         | `Ok bckps -> bckps
         (*TODO: raise error for duplicate*)
         | `Duplicate_key _  -> Map.empty(module RoleName) in
+    let notifiers = find_notifiers notifier backups rel_rs gtype in
     let crashed_rs = Set.empty (module RoleName) in
     let aware_of_rs = Map.empty (module RoleName) in
     let handled_rs = Set.empty (module RoleName) in
@@ -1385,6 +1428,7 @@ let failover (global_protocol : global_protocol) =
             ~crashed_rs: crashed_rs
             ~handled_rs: handled_rs
             ~backups: backups
+            ~notifiers: notifiers
             ~aware_of_rs: aware_of_rs
             ~glb_prot: gtype
             gtype
