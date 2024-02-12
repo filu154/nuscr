@@ -675,9 +675,6 @@ let rec senders = function
 let rec generate_crash_branch allow_local (t: t) crashed_r aware_rs = 
     match t with
         | MessageG (msg, sender, receiver, t') ->
-            let aware_rs' = Set.add aware_rs receiver in
-            let continuation = 
-                generate_crash_branch allow_local t' crashed_r aware_rs' in
 
             let sender_aware = Set.mem aware_rs sender in
             let receiver_aware = Set.mem aware_rs receiver in 
@@ -689,18 +686,21 @@ let rec generate_crash_branch allow_local (t: t) crashed_r aware_rs =
                                     || (receiver_crashed && sender_aware) in
             let notify = (sender_crashed || sender_aware) && not receiver_aware in
 
+
             if skip_communication 
-                then continuation
+                then generate_crash_branch allow_local t' crashed_r aware_rs 
             else if notify                 
-                then MessageG ( {label = LabelName.of_string label; payload = []}
+            then 
+                let aware_rs' = Set.add aware_rs receiver in
+                MessageG ( {label = LabelName.of_string label; payload = []}
                               , sender
                               , receiver
-                              , continuation)
+                              , generate_crash_branch allow_local t' crashed_r aware_rs' )
             else if allow_local
                 then MessageG ( msg
                               , sender
                               , receiver
-                              , continuation)
+                              , generate_crash_branch allow_local t' crashed_r aware_rs )
             else
                 uerr @@ UnawareOfCrash (sender, receiver)
 
@@ -944,9 +944,7 @@ let rec add_failover_branches
                             ~aware_of_rs: aware_of_rs
                             ~glb_prot: glb_prot
                             t in
-                let notified_rs = Set.of_list (module RoleName) [p ; q] in
-                let waiting_rs = 
-                    participants cont |> flip Set.diff notified_rs in 
+                let aware_rs = Set.of_list (module RoleName) [p ; q] in
                 let allow_local = true in
                 let crash_m = { label = 
                                    LabelName.of_string "CRASH"
@@ -955,7 +953,7 @@ let rec add_failover_branches
                 MessageG ( crash_m
                          , p
                          , q
-                         , generate_crash_branch allow_local cont p waiting_rs )
+                         , generate_crash_branch allow_local cont p aware_rs )
             in
             let noncrash_branch = 
                 MessageG ( m
