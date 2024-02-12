@@ -217,7 +217,7 @@ let nested_role_decls == LPAR ; nms = separated_nonempty_list(COMMA, role_decl) 
 let role_decl == 
     | ROLE_KW ; nm = rolename ; { Role (nm) } 
     | RELIABLE_KW ; ROLE_KW ; nm = rolename ; { ReliableRole (nm) } 
-    | RELIABLE_KW ; ASTER ; nm = rolename ; { Notifier (nm) }
+    | RELIABLE_KW ; ROLE_KW ; ASTER ; nm = rolename ; { Notifier (nm) }
     | ROLE_KW ; nm1 = rolename ; REPLACES_KW ; nm2 = rolename ; { BackupRole (nm1, nm2)} 
 
 let new_role_decls == SEMICOLON ; NEW_KW ;
