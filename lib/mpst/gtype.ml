@@ -633,31 +633,6 @@ let nested_t_of_module (scr_module : Syntax.scr_module) =
   normalise_nested_t @@ add_missing_payload_field_names nested_t
 
 
-let add_to_set roles_to_ignore role set_of_roles = 
-    if Set.mem roles_to_ignore role   
-    then set_of_roles
-    else Set.add set_of_roles role
-
-let rec waiting_rs roles_to_ignore = function
-    | MessageG (_, s, r, t) -> 
-        waiting_rs roles_to_ignore t 
-            |> add_to_set roles_to_ignore s 
-            |> add_to_set roles_to_ignore r
-
-    | ChoiceG (s, choices) ->
-            let waiting_rs' = List.map ~f:(waiting_rs roles_to_ignore) choices in
-            Set.union_list (module RoleName) waiting_rs' 
-                |> add_to_set roles_to_ignore s
-
-    | MuG (_, _, t) -> waiting_rs roles_to_ignore t
-
-    | CallG (caller, _, roles, t) ->
-            let rs_set = Set.of_list (module RoleName) roles in
-            waiting_rs roles_to_ignore t 
-                |> add_to_set roles_to_ignore caller 
-                |> Set.union rs_set
-
-    | _ -> Set.empty(module RoleName)
 
 let flip f y x = f x y
 
