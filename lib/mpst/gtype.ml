@@ -697,22 +697,22 @@ let rec senders = function
 
     | _ -> Set.empty(module RoleName)
 
-let rec generate_crash_branch allow_local (t: t) crashed_r waiting_rs = 
+let rec generate_crash_branch allow_local (t: t) crashed_r aware_rs = 
     match t with
         | MessageG (msg, sender, receiver, t') ->
-            let waiting_rs' = Set.remove waiting_rs receiver in
+            let aware_rs' = Set.add aware_rs receiver in
             let continuation = 
-                generate_crash_branch allow_local t' crashed_r waiting_rs' in
+                generate_crash_branch allow_local t' crashed_r aware_rs' in
 
-            let sender_waiting = Set.mem waiting_rs sender in 
-            let receiver_waiting = Set.mem waiting_rs receiver in
-            let sender_crashed = RoleName.equal sender crashed_r in 
+            let sender_aware = Set.mem aware_rs sender in
+            let receiver_aware = Set.mem aware_rs receiver in 
+            let sender_crashed = RoleName.equal sender crashed_r in
             let receiver_crashed = RoleName.equal receiver crashed_r in
-            let label = if sender_crashed then "CRASH" else "EXIT" in
 
-            let skip_communication = ((not sender_waiting) && (not receiver_waiting)) 
-                                    || (receiver_crashed && not sender_waiting) in
-            let notify = (sender_crashed || not sender_waiting) && receiver_waiting in
+            let label = if sender_crashed then "CRASH" else "EXIT" in
+            let skip_communication = (sender_aware && receiver_aware)
+                                    || (receiver_crashed && sender_aware) in
+            let notify = (sender_crashed || sender_aware) && not receiver_aware in
 
             if skip_communication 
                 then continuation
@@ -736,24 +736,24 @@ let rec generate_crash_branch allow_local (t: t) crashed_r waiting_rs =
                 match List.hd choices with
                 | Some (MessageG (m, s, r, t)) ->
                         let msg_g = MessageG (m, s, r, t) in
-                        generate_crash_branch allow_local msg_g crashed_r waiting_rs 
+                        generate_crash_branch allow_local msg_g crashed_r aware_rs
                 | _ -> unimpl ~here:[%here] 
                 "Generating crash behaviour in choice that \ 
                 does not start with a message" 
             else 
                 ChoiceG ( p
                         , List.map choices
-                            ~f: (fun ch -> generate_crash_branch allow_local ch crashed_r waiting_rs))
+                            ~f: (fun ch -> generate_crash_branch allow_local ch crashed_r aware_rs))
 
         | MuG (tvar, el, t) -> 
                 MuG ( tvar
                     , el
-                    , generate_crash_branch allow_local t crashed_r waiting_rs) 
+                    , generate_crash_branch allow_local t crashed_r aware_rs) 
         | CallG (caller, protocol, participants, t) -> 
                 CallG ( caller
                       , protocol
                       , participants
-                      , generate_crash_branch allow_local t crashed_r waiting_rs)
+                      , generate_crash_branch allow_local t crashed_r aware_rs)
         | EndG -> EndG
         | other_t -> other_t
 
@@ -773,43 +773,39 @@ let rec add_crash_branches allow_local reliable_rs (gtype : t) =
                          , receiver
                          , add_crash_branches allow_local reliable_rs t)
             else
-                let roles_to_ignore = 
+                let aware_rs = 
                     Set.of_list (module RoleName) [sender; receiver] in
-                let waiting_rs' = waiting_rs roles_to_ignore t in
                 ChoiceG(
                 sender,
                 [ MessageG ({ label = LabelName.of_string "CRASH"; payload = [] } 
                             , sender 
                             , receiver 
-                            , generate_crash_branch allow_local t sender waiting_rs')
+                            , generate_crash_branch allow_local t sender aware_rs)
                 ; MessageG ( msg
                            , sender
                            , receiver
                            , add_crash_branches allow_local reliable_rs t)])
 
         | ChoiceG (sender, choices) ->
-            let unfolded_choices = List.map ~f:unfold choices in
             (* with the assumption that we do not allow choice of choice of
              * we can assume that after unfolding all branches if they start
              * with a recursion, we are left 
              * only with messages as the first communication *)
-            let some_branch = 
-                match List.hd unfolded_choices with
-                    | None -> EndG
-                    | Some branch -> branch in
-            let roles_to_ignore = Set.singleton (module RoleName) sender in
-            let waiting_rs' = waiting_rs roles_to_ignore some_branch in
-            let crash_branch =
-                generate_crash_branch allow_local some_branch sender waiting_rs' in 
             let uncrashed_branches = 
                 List.map
                 ~f: (apply_to_continuation (add_crash_branches allow_local reliable_rs))
-                unfolded_choices in
+                choices in
             if Set.mem reliable_rs sender
-            then 
-                ChoiceG(sender, uncrashed_branches)
+            then ChoiceG(sender, uncrashed_branches)
             else
-                ChoiceG(sender, crash_branch :: uncrashed_branches)
+            let some_branch = 
+                match List.hd choices with
+                    | None -> EndG
+                    | Some branch -> branch in
+            let aware_rs = Set.singleton (module RoleName) sender in
+            let crash_branch =
+                generate_crash_branch allow_local some_branch sender aware_rs in 
+            ChoiceG(sender, crash_branch :: uncrashed_branches)
 
         | MuG (tvar, el, t) -> 
                 MuG (tvar, el, add_crash_branches allow_local reliable_rs t)
