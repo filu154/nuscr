@@ -985,7 +985,7 @@ let rec add_failover_branches
 
         else if p_reliable
         then
-            MessageG (m, p, q, add_failover_branches 
+            (* MessageG (m, p, q, add_failover_branches 
                                     ~rel_rs: rel_rs
                                     ~crashed_rs: crashed_rs
                                     ~handled_rs: handled_rs
@@ -993,9 +993,9 @@ let rec add_failover_branches
                                     ~notifiers: notifiers
                                     ~aware_of_rs: aware_of_rs
                                     ~glb_prot: glb_prot
-                                    t)
+                                    t) *)
 
-            (* let p_aware_of = 
+            let p_aware_of = 
                 match Map.find aware_of_rs p with
                 | Some rs -> rs
                 | None -> Set.empty (module RoleName) in
@@ -1033,7 +1033,7 @@ let rec add_failover_branches
                                    LabelName.of_string label
                                ; payload =
                                    [] } in
-                MessageG (crash_m, p, q, cont) *) 
+                MessageG (crash_m, p, q, cont)
         else
 
         let senders = senders t in
@@ -1429,15 +1429,10 @@ let rec add_failover_branches
                 Set.fold crashed_rs
                     ~init: notify_unrel_rs
                     ~f: (fun accum r ->
-                    (* find reliable roles unaware of r's crash *)
-                    let aware_rs = 
-                        match Map.find aware_of_rs r with
-                        | Some rs -> rs
-                        | None -> Set.empty (module RoleName) in
                     (* rel_rs contains inactive backups too, so need to
                     intersect with participants from current run *)
-                    let unaware_rel_rs = 
-                        Set.inter pt rel_rs |> flip Set.diff aware_rs in
+                    let to_notify_rs = 
+                        Set.inter pt rel_rs in
                     let m = { label = 
                                 LabelName.of_string ("CRASHED"^RoleName.user r)
                             ; payload = 
@@ -1446,7 +1441,7 @@ let rec add_failover_branches
                     match Map.find notifiers r with 
                     | Some n ->
                         (* send crashed messages *)
-                        Set.remove unaware_rel_rs n 
+                        Set.remove to_notify_rs n 
                         |> Set.fold 
                             ~init: accum
                             ~f: (fun accum' q -> MessageG (m, n, q, accum'))
