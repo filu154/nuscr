@@ -906,7 +906,7 @@ let rec _add_crash_branches allow_local reliable_rs (gtype : t) =
              * only with messages as the first communication *)
             let uncrashed_branches = 
                 List.map
-                ~f: (apply_to_continuation (add_crash_branches allow_local reliable_rs))
+                ~f: (apply_to_continuation (_add_crash_branches allow_local reliable_rs))
                 choices in
             if Set.mem reliable_rs sender
             then ChoiceG(sender, uncrashed_branches)
@@ -921,9 +921,9 @@ let rec _add_crash_branches allow_local reliable_rs (gtype : t) =
             ChoiceG(sender, crash_branch :: uncrashed_branches)
 
         | MuG (tvar, el, t) -> 
-                MuG (tvar, el, add_crash_branches allow_local reliable_rs t)
+                MuG (tvar, el, _add_crash_branches allow_local reliable_rs t)
         | CallG (c, p, pts, t) -> 
-                CallG (c, p, pts, add_crash_branches allow_local reliable_rs t)
+                CallG (c, p, pts, _add_crash_branches allow_local reliable_rs t)
         | EndG -> EndG
         | other_t -> other_t
 
