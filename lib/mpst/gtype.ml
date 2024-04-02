@@ -946,16 +946,117 @@ let local_graceful_failure (global_protocol : global_protocol) =
     basic_add_crash_branches allow_local_comms set_reliable_rs gtype 
 
 
+module MessageKey = struct
+    module T = struct
+        type t = Message.message [@@deriving ord, sexp_of]
+    end
+    include T
+    include Comparator.Make(T)
+end
+
+type first_r = 
+    | Sender of RoleName.t
+    | Receiver of RoleName.t
+
+let merge_labels p labels_map = 
+    (*q should be consistent across all entries in the map,
+      so pick any element from map*)
+    let q = match Map.min_elt labels_map with
+        | None -> Sender p
+        | Some (_, (_, q)) -> q in
+    let choices = Map.fold labels_map
+        ~init: []
+        ~f: (fun ~key: m ~data: (t, r) accum -> 
+            match r with 
+            | Sender p' -> (MessageG (m, p', p, t) :: accum)
+            | Receiver q' -> (MessageG (m, p, q', t) :: accum)) in
+    match q with
+    | Sender q' -> ChoiceG (q', choices)
+    | Receiver _ -> ChoiceG (p, choices)
+
+let rec replace_in_gtype r merged_choices = function
+    | MessageG (m, p, q, t) ->
+            if RoleName.equal p r || RoleName.equal q r
+            then merged_choices
+            else MessageG (m, p, q, replace_in_gtype r merged_choices t)
+
+    | ChoiceG (p, choices) -> 
+            ( match List.hd choices with
+            | Some (MessageG (_, _, q, _)) ->
+                if RoleName.equal p r || RoleName.equal q r
+                then merged_choices
+                else ChoiceG (p, List.map ~f:(replace_in_gtype r merged_choices) choices)
+            | _ -> EndG )
+    | MuG (tvar, el, t) -> MuG (tvar, el, replace_in_gtype r merged_choices t)
+    | _ -> EndG
+    
+let rec merge_gtype_on r t = 
+    (*helper function*)
+    let rec labels_to_merge = function
+        | MessageG (m, p, q, t) ->
+            let sender_r = RoleName.equal p r in
+            let receiver_r = RoleName.equal q r in
+
+            if sender_r && receiver_r
+            then 
+                merge_gtype_on r t |> labels_to_merge
+            else if not sender_r && not receiver_r
+            then labels_to_merge t
+            else
+                (* first role that communicates with the role we are merging *) 
+                let first_r = if sender_r 
+                              then Receiver q 
+                              else Sender p in
+                Map.singleton (module MessageKey) m (merge_gtype_on r t, first_r)
+
+        | ChoiceG (_, choices) ->
+            List.fold choices
+                ~init: (Map.empty (module MessageKey))
+                ~f: (fun accum t -> 
+                    Map.merge_skewed accum (labels_to_merge t)
+                        ~combine: (fun ~key: _ t1 _ -> t1))
+        | MuG (_, _, t) -> labels_to_merge t
+        | _ -> Map.empty (module MessageKey) 
+    in
+    match t with
+    | MessageG (m, p, q, t) ->
+        if RoleName.equal p r && RoleName.equal q r
+        then merge_gtype_on r t
+        else MessageG (m, p, q, merge_gtype_on r t)
+
+    | ChoiceG (p, choices) ->
+        ( match List.hd choices with
+        | Some (MessageG (_, _, q, t)) ->
+            if RoleName.equal p r && RoleName.equal q r
+            then 
+                (* 1. merge on one choice
+                   2. from all choices find first interaction of r with 
+                some other role and save messages 
+                   3. merge them
+                   4. append them in the merged choice where
+                they are supposed to be
+                i.e. first interaction in which r is involved *)
+                let merged_t = merge_gtype_on r t in
+                let labels_map = labels_to_merge (ChoiceG (p, choices)) in
+
+                if Map.is_empty labels_map
+                then merged_t
+                else
+                    let merged_choices = merge_labels p labels_map in
+                    replace_in_gtype r merged_choices merged_t
+            else ChoiceG (p, List.map ~f:(merge_gtype_on r) choices)
+        | _ -> EndG )
+    | MuG (tvar, el, t) -> MuG (tvar, el, merge_gtype_on r t)
+    | other_t -> other_t
+
 
 let update_role crashed_rs backups r =
     if Set.mem crashed_rs r
-    then 
-        match Map.find backups r with
+    then match Map.find backups r with
         | Some b -> b
         | None -> r (*this branch will be taken by crashed roles
                       that do not have a backup*)
-    else
-        r
+    else r
 
 let rec replace crashed_rs backups = function
     | MessageG (m, p, q, t) ->
@@ -1348,7 +1449,7 @@ let rec add_failover_branches
                                 | None -> Set.singleton (module RoleName) p )
                     in
                     let aware_of_p = match Map.find aware_of_rs q with
-                                    | Some rs -> Set.mem rs q
+                                    | Some rs -> Set.mem rs p
                                     | None -> false in
                     (*TODO: test if you need to check here if q is already aware of p*)
                     let cont = add_failover_branches 
@@ -1621,7 +1722,20 @@ let rec add_failover_branches
                     | None -> EndG (* this branch will never be taken *)
             ) in
 
-            notify_rel_rs
+            (* find backups that are introduced in the next run
+               that are already participants of this protocol *)
+            let require_merging_on = 
+                Map.fold backups
+                    ~init: ( Set.empty (module RoleName) )
+                    ~f: (fun ~key: r ~data: b accum -> 
+                        if Set.mem crashed_rs r
+                        then Set.add accum b
+                        else accum)
+                |> Set.inter pt in
+            Set.fold require_merging_on
+                ~init: notify_rel_rs
+                ~f: (fun accum b -> merge_gtype_on b accum)
+
 (*
             (* let notify_about_crashes = *)
                 Set.fold crashed_rs 
