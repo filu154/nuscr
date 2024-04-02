@@ -101,6 +101,8 @@ and token lexbuf =
   | "role" -> ROLE_KW
   | "reliable" -> RELIABLE_KW
   | "replaces" -> REPLACES_KW
+  | "replaced" -> REPLACED_KW
+  | "by" -> BY_KW
   | "from" -> FROM_KW
   | "to" -> TO_KW
   | "choice" -> CHOICE_KW

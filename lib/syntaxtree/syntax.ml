@@ -75,6 +75,7 @@ let pp_payloadt fmt p = Stdlib.Format.fprintf fmt "%s" (show_payloadt p)
 
 type role = 
     | Role of RoleName.t
+    | RoleWithBackup of RoleName.t * RoleName.t
     | ReliableRole of RoleName.t
     | BackupRole of RoleName.t * RoleName.t
     | Notifier of RoleName.t

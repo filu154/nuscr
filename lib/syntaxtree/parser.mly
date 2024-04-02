@@ -44,6 +44,8 @@
 %token ROLE_KW
 %token RELIABLE_KW
 %token REPLACES_KW
+%token REPLACED_KW
+%token BY_KW
 
 %token FROM_KW
 %token TO_KW
@@ -119,6 +121,10 @@ let raw_global_protocol_decl ==
             let (rs, reliable_rs, backups_map, n) = split_roles roles in
             match role with
             | Role r -> (r :: rs, reliable_rs, backups_map, n)
+            | RoleWithBackup (r1, r2) -> ( r1 :: rs
+                                         , r2 :: reliable_rs
+                                         , (r1, r2) :: backups_map 
+                                         , n )
             | ReliableRole r -> (rs, r :: reliable_rs, backups_map, n) 
             | BackupRole (b, r) -> ( r :: rs 
                                    , b :: reliable_rs
@@ -166,6 +172,12 @@ let raw_nested_protocol_decl ==
             let (rs, reliable_rs, backups_map, n) = split_roles roles in
             match role with
             | Role r -> (r :: rs, reliable_rs, backups_map, n)
+            (*TODO: maybe raise error here in case r2 was not declared
+             before r1*)
+            | RoleWithBackup (r1, r2) -> ( r1 :: rs
+                                         , reliable_rs
+                                         , (r1, r2) :: backups_map 
+                                         , n )
             | ReliableRole r -> (rs, r :: reliable_rs, backups_map, n) 
             | BackupRole (b, r) -> ( r :: rs
                                    , b :: reliable_rs
@@ -179,6 +191,7 @@ let raw_nested_protocol_decl ==
     and unpack_roles = function 
         | [] -> []
         | (Role r :: roles) -> r :: unpack_roles roles 
+        | (RoleWithBackup (r, _) :: roles) -> r :: unpack_roles roles 
         | (ReliableRole r :: roles) -> r :: unpack_roles roles 
         | (BackupRole (b, _) :: roles) -> b :: unpack_roles roles 
         | (Notifier n :: roles) -> n :: unpack_roles roles in
@@ -216,6 +229,8 @@ let nested_role_decls == LPAR ; nms = separated_nonempty_list(COMMA, role_decl) 
 
 let role_decl == 
     | ROLE_KW ; nm = rolename ; { Role (nm) } 
+    | ROLE_KW ; nm1 = rolename ; REPLACED_KW ; BY_KW ; nm2 = rolename ; 
+        { RoleWithBackup (nm1, nm2) }
     | RELIABLE_KW ; ROLE_KW ; nm = rolename ; { ReliableRole (nm) } 
     | RELIABLE_KW ; ROLE_KW ; ASTER ; nm = rolename ; { Notifier (nm) }
     | ROLE_KW ; nm1 = rolename ; REPLACES_KW ; nm2 = rolename ; { BackupRole (nm1, nm2)} 
