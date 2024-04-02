@@ -876,7 +876,7 @@ let rec basic_add_crash_branches allow_local reliable_rs = function
         | other_t -> other_t
 
 (* add crash branch whenever communication from an unreliable role is found *)
-let rec add_crash_branches allow_local reliable_rs (gtype : t) = 
+let rec _add_crash_branches allow_local reliable_rs (gtype : t) = 
     match gtype with
         | MessageG (msg, sender, receiver, t) -> 
             if Set.mem reliable_rs sender 
@@ -884,7 +884,7 @@ let rec add_crash_branches allow_local reliable_rs (gtype : t) =
                 MessageG ( msg
                          , sender
                          , receiver
-                         , add_crash_branches allow_local reliable_rs t)
+                         , _add_crash_branches allow_local reliable_rs t)
             else
                 let aware_rs = 
                     Set.of_list (module RoleName) [sender; receiver] in
@@ -897,7 +897,7 @@ let rec add_crash_branches allow_local reliable_rs (gtype : t) =
                 ; MessageG ( msg
                            , sender
                            , receiver
-                           , add_crash_branches allow_local reliable_rs t)])
+                           , _add_crash_branches allow_local reliable_rs t)])
 
         | ChoiceG (sender, choices) ->
             (* with the assumption that we do not allow choice of choice of
