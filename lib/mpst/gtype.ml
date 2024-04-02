@@ -943,7 +943,7 @@ let local_graceful_failure (global_protocol : global_protocol) =
     let reliable_rs = global_protocol.value.split_roles.reliable_roles in
     let set_reliable_rs = Set.of_list (module RoleName) reliable_rs in
     let allow_local_comms = true in
-    add_crash_branches allow_local_comms set_reliable_rs gtype 
+    basic_add_crash_branches allow_local_comms set_reliable_rs gtype 
 
 
 
