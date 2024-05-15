@@ -682,73 +682,31 @@ module RoleNamePair = struct
 end
 *)
 
-let rec basic_generate_crash_branch allow_local crashed_r aware_rs = function 
-    | MessageG (msg, sender, receiver, t') ->
-        let sender_aware_crash = Map.mem aware_rs sender in
-        (* sender_aware_receiver and receiver_aware_sender would always have
-         the same value because both get added to each other's map when 
-         there is a communication between them to notify about the crash *)
-        let sender_aware_receiver = match Map.find aware_rs sender with
-            | None -> false
-            | Some rs -> Set.mem rs receiver in
-        let sender_crashed = RoleName.equal sender crashed_r in
-
-        let label = if sender_crashed then "CRASH" else "EXIT" in
-        let skip_communication = sender_aware_receiver in 
-        let notify = sender_aware_crash && not sender_aware_receiver in
-
-        if skip_communication
-        then basic_generate_crash_branch allow_local crashed_r aware_rs t'
-        else if notify
-        then
-            let aware_rs' = 
-                Map.update aware_rs sender
-                    ~f: ( function 
-                        | None -> Set.singleton (module RoleName) receiver
-                        | Some rs -> Set.add rs receiver ) in
-            let aware_rs' = 
-                Map.update aware_rs' receiver
-                    ~f: ( function 
-                        | None -> Set.singleton (module RoleName) sender
-                        | Some rs -> Set.add rs sender ) in
+let rec basic_generate_crash_branch crashed_r = function 
+    | MessageG (_, sender, receiver, t') ->
+        let label = if RoleName.equal crashed_r sender then "CRASH" else "EXIT" in
             MessageG ( {label = LabelName.of_string label; payload = []} 
                       , sender
                       , receiver
-                      , basic_generate_crash_branch allow_local crashed_r aware_rs' t' )
-        else if allow_local
-        then MessageG ( msg
-                      , sender
-                      , receiver
-                      , basic_generate_crash_branch allow_local crashed_r aware_rs t' )
-        else
-            uerr @@ UnawareOfCrash (sender, receiver)
+                      , basic_generate_crash_branch crashed_r t' )
 
-
-        | ChoiceG (p, choices) ->
+        | ChoiceG (_, choices) ->
             (* with the assumption that every choice has a communication between sender and another role *)
-            if RoleName.equal p crashed_r || not allow_local
-            then 
-                match List.hd choices with
-                | Some (MessageG (m, s, r, t)) ->
-                        let msg_g = MessageG (m, s, r, t) in
-                        basic_generate_crash_branch allow_local crashed_r aware_rs msg_g 
+                ( match List.hd choices with
+                | Some ch->
+                        basic_generate_crash_branch crashed_r ch 
                 | _ -> unimpl ~here:[%here] 
-                "Generating crash behaviour in choice that \ 
-                does not start with a message" 
-            else 
-                ChoiceG ( p
-                        , List.map choices
-                            ~f: (fun ch -> basic_generate_crash_branch allow_local crashed_r aware_rs ch))
+                "Generating crash behaviour in choice that" )
 
         | MuG (tvar, el, t) -> 
                 MuG ( tvar
                     , el
-                    , basic_generate_crash_branch allow_local crashed_r aware_rs t) 
+                    , basic_generate_crash_branch crashed_r t) 
         | CallG (caller, protocol, participants, t) -> 
                 CallG ( caller
                       , protocol
                       , participants
-                      , basic_generate_crash_branch allow_local crashed_r aware_rs t)
+                      , basic_generate_crash_branch crashed_r t)
         | EndG -> EndG
         | other_t -> other_t
             
@@ -818,33 +776,26 @@ let apply_to_continuation f = function
     | MessageG (msg, s, r, t) -> MessageG(msg, s, r, f t)
     | g -> f g 
 
-let rec basic_add_crash_branches allow_local reliable_rs = function
+let rec basic_add_crash_branches reliable_rs = function
     | MessageG (msg, sender, receiver, t) -> 
         if Set.mem reliable_rs sender 
         then 
             MessageG ( msg
                      , sender
                      , receiver
-                     , basic_add_crash_branches allow_local reliable_rs t)
+                     , basic_add_crash_branches reliable_rs t)
         else
-            let aware_rs =
-            match Map.of_alist (module RoleName) 
-                    [ (sender, Set.singleton (module RoleName) receiver) 
-                    ; (receiver, Set.singleton (module RoleName) sender) ] with
-            | `Duplicate_key _ -> Map.empty (module RoleName)
-            | `Ok m -> m in
-
             ChoiceG(
             sender,
             [ MessageG ({ label = LabelName.of_string "CRASH"; payload = [] } 
                         , sender 
                         , receiver 
-                        , basic_generate_crash_branch allow_local sender aware_rs t
-                        |> basic_add_crash_branches allow_local (Set.add reliable_rs sender))
+                        , basic_generate_crash_branch sender t
+                        |> basic_add_crash_branches (Set.add reliable_rs sender))
             ; MessageG ( msg
                        , sender
                        , receiver
-                       , basic_add_crash_branches allow_local reliable_rs t)])
+                       , basic_add_crash_branches reliable_rs t)])
 
         | ChoiceG (sender, choices) ->
             (* with the assumption that we do not allow choice of choice of
@@ -853,7 +804,7 @@ let rec basic_add_crash_branches allow_local reliable_rs = function
              * only with messages as the first communication *)
             let uncrashed_branches = 
                 List.map
-                ~f: (apply_to_continuation (basic_add_crash_branches allow_local reliable_rs))
+                ~f: (apply_to_continuation (basic_add_crash_branches reliable_rs))
                 choices in
             if Set.mem reliable_rs sender
             then ChoiceG(sender, uncrashed_branches)
@@ -934,16 +885,14 @@ let graceful_failure (global_protocol : global_protocol) =
     let gtype = of_protocol global_protocol in
     let reliable_rs = global_protocol.value.split_roles.reliable_roles in
     let set_reliable_rs = Set.of_list (module RoleName) reliable_rs in
-    let allow_local_comms = false in
-    basic_add_crash_branches allow_local_comms set_reliable_rs gtype 
+    basic_add_crash_branches set_reliable_rs gtype 
 
 let local_graceful_failure (global_protocol : global_protocol) = 
     let open! Syntax in
     let gtype = of_protocol global_protocol in
     let reliable_rs = global_protocol.value.split_roles.reliable_roles in
     let set_reliable_rs = Set.of_list (module RoleName) reliable_rs in
-    let allow_local_comms = true in
-    basic_add_crash_branches allow_local_comms set_reliable_rs gtype 
+    basic_add_crash_branches set_reliable_rs gtype 
 
 
 module MessageKey = struct
