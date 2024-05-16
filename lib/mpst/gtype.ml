@@ -761,7 +761,7 @@ let gf_skip csp p q =
 
 let update_gf_param rel_rs indices lcp csp p q = 
     let p_rel = Set.mem rel_rs p in
-    let indices' = if p_rel then update_indices indices p else indices in
+    let indices' = if not p_rel then update_indices indices p else indices in
     let lcp' = 
         if p_rel then Map.update lcp q ~f:(function | _ -> Map.find_exn lcp p)
         else 
