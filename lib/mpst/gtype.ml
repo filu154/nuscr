@@ -850,9 +850,222 @@ let rec _crash_branch ~rel_rs ~indices ~crs ~lcp ~csp ~rec_t ~unf = function
                       , _crash_branch ~rel_rs ~indices ~crs ~lcp ~csp ~unf ~rec_t t)
         | EndG -> EndG
 
+let aware_of_crash crs pcp p = Map.mem pcp p || Set.mem crs p
+
+let update_lgf_aw rel_rs indices aw p q = 
+    if Set.mem rel_rs p 
+    then Map.map aw ~f:(fun s -> if Set.mem s p then Set.add s q else s)
+    else 
+        let p_indexed = indexed_role indices p in
+        let new_entry = Set.of_list (module RoleName) [p ; q] in
+        Map.add_exn aw ~key:p_indexed ~data:new_entry
+
+let update_lgf_cb crs cb pcp p q = 
+    if aware_of_crash crs pcp p 
+    then Set.add cb (p,q) |> flip Set.add (q,p)
+    else cb
+
+let update_lgf_pcp indices crs pcp aw p q = 
+    if aware_of_crash crs pcp p
+    then if aware_of_crash crs pcp q 
+        then pcp (*skip update if q is aware of crash*)
+        else if Set.mem crs p
+            (*q unaware, p crashed, set only to p indexed*)
+            then Map.add_exn pcp ~key:q 
+                ~data: (indexed_role indices p 
+                        |> Set.singleton (module RoleName))
+           (*q unaware, p not crashed, set to all possible crash points*)
+           else let new_entry = Map.fold aw 
+                                ~init: (Set.empty (module RoleName))
+                                ~f:(fun ~key ~data acc -> 
+                                    if Set.mem data p 
+                                    then Set.add acc key 
+                                    else acc)
+            in Map.add_exn pcp ~key:q ~data:new_entry 
+    else pcp
+
+let _update_lgf_param rel_rs indices crs cb pcp aw p q = 
+    let p_rel = Set.mem rel_rs p in
+    let indices' = if not p_rel then update_indices indices p else indices in
+    let aw' = update_lgf_aw rel_rs indices aw p q in
+    let cb' = update_lgf_cb crs cb pcp p q in
+    let pcp' = update_lgf_pcp indices crs pcp aw p q in
+    (indices', cb', pcp', aw')
+
+let lgf_skip cb pcp aw p q =
+    let comm_already = Set.mem cb (p,q) in
+    let aware_p = Map.mem pcp p in
+    let aware_q = Map.mem pcp q in
+    let cond_p = if aware_p 
+                 then let pcp_p = Map.find_exn pcp p in
+                 Set.fold pcp_p ~init:true 
+                 ~f:(fun acc r -> 
+                     let aw_r = Map.find_exn aw r in
+                     acc && Set.mem aw_r q)
+                 else true in
+    let cond_q = if aware_q 
+                 then let pcp_q = Map.find_exn pcp q in
+                 Set.fold pcp_q ~init:true 
+                 ~f:(fun acc r -> 
+                     let aw_r = Map.find_exn aw r in
+                     acc && Set.mem aw_r p)
+                 else true in
+    comm_already || ((aware_p || aware_q) && cond_p && cond_q)
+
 let apply_to_continuation f = function
     | MessageG (msg, s, r, t) -> MessageG(msg, s, r, f t)
     | g -> f g 
+
+let rec _crash_branch_lgf 
+    ~rel_rs ~indices ~crs ~cb ~pcp ~aw ~a ~rec_t = function
+    | MessageG(m, p, q, t) ->
+        let p_rel = Set.mem rel_rs p in
+        let indices' = if not p_rel then update_indices indices p else indices in
+        let aw' = update_lgf_aw rel_rs indices aw p q in
+
+        let p_crashed = Set.mem crs p in
+        let q_crashed = Set.mem crs q in
+
+        if p_rel && not (aware_of_crash crs pcp p) 
+        (*p is reliable but not aware of crash*)
+        then MessageG( m, p, q
+                     , _crash_branch_lgf ~rel_rs ~indices:indices' 
+                                         ~crs ~cb ~pcp ~aw:aw' ~a ~rec_t t)
+        else if not p_rel && not (aware_of_crash crs pcp p)
+        then 
+        (*p is unreliable but not aware of crash*)
+            let safe_branch = 
+                MessageG( m, p, q
+                        , _crash_branch_lgf ~rel_rs ~indices:indices' 
+                                            ~crs ~cb ~pcp 
+                                            ~aw:aw' ~a ~rec_t t) in
+            let crash_branch = 
+                let crs' = Set.add crs p in
+                let cb' = update_lgf_cb crs' cb pcp p q in
+                let pcp' = update_lgf_pcp indices crs' pcp aw p q in
+                let a' = Set.add a p |> flip Set.add q in
+                MessageG( {label = LabelName.of_string "CRASH"; payload = []}
+                        , p, q
+                        , _crash_branch_lgf ~rel_rs ~indices:indices' 
+                                            ~crs:crs' ~cb:cb' ~pcp:pcp' 
+                                            ~aw:aw' ~a:a' ~rec_t t) 
+            in
+            ChoiceG( p, [safe_branch; crash_branch])
+        else if p_crashed && q_crashed
+        then _crash_branch_lgf ~rel_rs ~indices:indices' 
+                               ~crs ~cb ~pcp ~aw:aw' ~a ~rec_t t
+        else if p_crashed 
+        then if not (lgf_skip cb pcp aw p q)
+             then
+             let cb' = update_lgf_cb crs cb pcp p q in
+             let pcp' = update_lgf_pcp indices crs pcp aw p q in
+             let a' = Set.add a q in
+             MessageG( {label = LabelName.of_string "CRASH"; payload = []}
+                     , p, q
+                     , _crash_branch_lgf ~rel_rs ~indices:indices' 
+                                        ~crs ~cb:cb' ~pcp:pcp' 
+                                        ~aw:aw' ~a:a' ~rec_t t)
+             else _crash_branch_lgf ~rel_rs ~indices:indices' 
+                                  ~crs ~cb ~pcp ~aw:aw' ~a ~rec_t t
+        else if lgf_skip cb pcp aw p q
+        then _crash_branch_lgf ~rel_rs ~indices:indices' 
+                               ~crs ~cb ~pcp ~aw:aw' ~a ~rec_t t
+        else 
+            (*they communicate about a crash*)
+            let cb' = update_lgf_cb crs cb pcp p q in
+            let a' = Set.add a q in
+            if p_rel
+            then
+                let pcp' = update_lgf_pcp indices crs pcp aw p q in
+                MessageG( {label = LabelName.of_string "EXIT"; payload = []}
+                        , p, q
+                        , _crash_branch_lgf ~rel_rs ~indices:indices' 
+                                            ~crs ~cb:cb' ~pcp:pcp'
+                                            ~aw:aw' ~a:a' ~rec_t t)
+            else
+            let safe_branch =
+                (*q infers p's possible crash points*)
+                let pcp' = update_lgf_pcp indices crs pcp aw p q in
+             MessageG( {label = LabelName.of_string "EXIT"; payload = []}
+                     , p, q
+                     , _crash_branch_lgf ~rel_rs ~indices:indices' 
+                                        ~crs ~cb:cb' ~pcp:pcp' 
+                                        ~aw:aw' ~a:a' ~rec_t t) in
+            let crash_branch =
+                let crs' = Set.add crs p in
+                let cb' = update_lgf_cb crs' cb pcp p q in
+                let pcp' = update_lgf_pcp indices crs' pcp aw p q in
+                MessageG( {label = LabelName.of_string "CRASH"; payload = []}
+                        , p, q
+                        , _crash_branch_lgf ~rel_rs ~indices:indices' 
+                                            ~crs:crs' ~cb:cb' ~pcp:pcp' 
+                                            ~aw:aw' ~a:a' ~rec_t t) in
+            ChoiceG( p, [safe_branch; crash_branch])
+
+    | ChoiceG (p, choices) ->
+        let some_branch = 
+            match List.hd choices with
+                | None -> EndG
+                | Some branch -> branch in
+        let q = match some_branch with
+            | MessageG (_, _, q, _) -> q
+            | _ -> unimpl ~here:[%here] "Choice with non-message branch" in
+        let aw' = update_lgf_aw rel_rs indices aw p q in
+        let indices' = if not (Set.mem rel_rs p)
+                       then update_indices indices p 
+                       else indices in
+        if Set.mem rel_rs p && not (aware_of_crash crs pcp p)
+        then
+            ChoiceG(p, List.map choices
+                    ~f: (apply_to_continuation 
+                        (_crash_branch_lgf ~rel_rs ~indices ~crs ~cb ~pcp 
+                                           ~aw:aw' ~a ~rec_t))) 
+        else if not (Set.mem rel_rs p) && not (aware_of_crash crs pcp p)
+        then 
+            (*p is not crashed but it is unreliable*)
+            let a' = Set.add a p |> flip Set.add q in
+            let crash_branch = 
+                let crs' = Set.add crs p in
+                _crash_branch_lgf ~rel_rs ~indices:indices' ~crs:crs' ~cb
+                                  ~pcp ~aw:aw' ~a:a' ~rec_t some_branch in
+            ChoiceG(p, crash_branch :: List.map choices
+                ~f: (apply_to_continuation 
+                    (_crash_branch_lgf ~rel_rs ~indices:indices' ~crs ~cb 
+                                       ~pcp ~aw:aw' ~a ~rec_t)))
+        else
+            let a' = Set.add a q in
+            _crash_branch_lgf ~rel_rs ~indices:indices' ~crs ~cb ~pcp 
+                              ~aw: aw' ~a:a' ~rec_t some_branch
+
+    | MuG (tvar, el, t) -> 
+            let rec_t' = Map.add_exn rec_t ~key:tvar ~data:t in
+            if not (Set.is_empty crs)
+            then _crash_branch_lgf ~rel_rs ~indices ~crs ~cb ~pcp 
+                                   ~aw ~a ~rec_t:rec_t' t
+            else
+            MuG (tvar, el, _crash_branch_lgf ~rel_rs ~indices ~crs ~cb ~pcp ~aw
+                                         ~a ~rec_t:rec_t' t)
+    | TVarG (tvar, es, t) -> 
+            if Set.is_empty a 
+            then if Set.is_empty crs
+                 then TVarG(tvar, es, t) (*no crash happened*)
+                 else EndG (*unfolding does not result in new comms*)
+            else 
+            let a' = Set.empty (module RoleName) in
+            Map.find_exn rec_t tvar 
+            |> _crash_branch_lgf ~rel_rs ~indices ~crs ~cb ~pcp ~aw ~a:a' ~rec_t 
+
+    | CallG (caller, protocol, participants, t) -> 
+            CallG ( caller
+                  , protocol
+                  , participants
+                  , _crash_branch_lgf ~rel_rs ~indices ~crs ~cb 
+                                      ~pcp ~aw ~a ~rec_t t)
+    | EndG -> EndG
+
+                
+
+
 
 let rec _basic_add_crash_branches reliable_rs = function
     | MessageG (msg, sender, receiver, t) -> 
@@ -1035,12 +1248,31 @@ let graceful_failure (global_protocol : global_protocol) =
     let rec_t = Map.empty (module TypeVariableName) in
     _crash_labels ~rel_rs ~indices gtype ~rec_t
 
+module RoleNamePair = struct
+    module Pair = struct
+        type t = RoleName.t * RoleName.t [@@deriving ord, sexp_of]
+    end
+    include Pair
+    include Comparator.Make (Pair)
+end
+
 let local_graceful_failure (global_protocol : global_protocol) = 
     let open! Syntax in
     let gtype = of_protocol global_protocol in
     let reliable_rs = global_protocol.value.split_roles.reliable_roles in
-    let set_reliable_rs = Set.of_list (module RoleName) reliable_rs in
-    _basic_crash_labels_lgf set_reliable_rs gtype 
+    let rel_rs = Set.of_list (module RoleName) reliable_rs in
+    let indices = 
+        participants gtype
+        |> Set.to_list 
+        |> List.map ~f:(fun r -> (r, 1))
+        |> Map.of_alist_exn (module RoleName) in
+    let crs = Set.empty (module RoleName) in
+    let cb = Set.empty (module RoleNamePair) in
+    let pcp = Map.empty (module RoleName) in
+    let aw = Map.empty (module RoleName) in
+    let a = Set.empty (module RoleName) in
+    let rec_t = Map.empty (module TypeVariableName) in
+    _crash_branch_lgf ~rel_rs ~indices ~crs ~cb ~pcp ~aw ~a ~rec_t gtype
 
 
 module MessageKey = struct
