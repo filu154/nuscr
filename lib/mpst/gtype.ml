@@ -682,120 +682,166 @@ module RoleNamePair = struct
 end
 *)
 
-let rec basic_generate_crash_branch crashed_r = function 
+let rec _basic_generate_crash_branch crashed_r = function 
     | MessageG (_, sender, receiver, t') ->
         let label = if RoleName.equal crashed_r sender then "CRASH" else "EXIT" in
             MessageG ( {label = LabelName.of_string label; payload = []} 
                       , sender
                       , receiver
-                      , basic_generate_crash_branch crashed_r t' )
+                      , _basic_generate_crash_branch crashed_r t' )
 
         | ChoiceG (_, choices) ->
             (* with the assumption that every choice has a communication between sender and another role *)
                 ( match List.hd choices with
                 | Some ch->
-                        basic_generate_crash_branch crashed_r ch 
+                        _basic_generate_crash_branch crashed_r ch 
                 | _ -> unimpl ~here:[%here] 
                 "Generating crash behaviour in choice that" )
 
         | MuG (tvar, el, t) -> 
                 MuG ( tvar
                     , el
-                    , basic_generate_crash_branch crashed_r t) 
+                    , _basic_generate_crash_branch crashed_r t) 
         | CallG (caller, protocol, participants, t) -> 
                 CallG ( caller
                       , protocol
                       , participants
-                      , basic_generate_crash_branch crashed_r t)
+                      , _basic_generate_crash_branch crashed_r t)
         | EndG -> EndG
         | other_t -> other_t
             
 
+let update_indices indices r = 
+    let index = Map.find_exn indices r in
+    Map.set indices ~key:r ~data:(index + 1)
 
-let rec generate_crash_branch allow_local (t: t) crashed_r aware_rs = 
-    match t with
-        | MessageG (msg, sender, receiver, t') ->
+let indexed_role indices r = 
+    let index = Map.find_exn indices r in
+    RoleName.of_string (RoleName.user r ^ Int.to_string index)
 
-            let sender_aware = Set.mem aware_rs sender in
-            let receiver_aware = Set.mem aware_rs receiver in 
-            let sender_crashed = RoleName.equal sender crashed_r in
-            let receiver_crashed = RoleName.equal receiver crashed_r in
+let gf_skip csp p q =
+    let p_csp = Map.find csp p 
+            |> Option.value ~default:(Set.empty (module RoleName)) in
+    let q_csp = Map.find csp q 
+            |> Option.value ~default:(Set.empty (module RoleName)) in
+    let non_empty = not (Set.is_empty p_csp) && not (Set.is_empty q_csp) in
+    non_empty && not (Set.is_empty (Set.inter p_csp q_csp))
 
-            let label = if sender_crashed then "CRASH" else "EXIT" in
-            let skip_communication = (sender_aware && receiver_aware)
-                                    || (receiver_crashed && sender_aware) in
-            let notify = (sender_crashed || sender_aware) && not receiver_aware in
+let update_gf_param rel_rs indices lcp csp p q = 
+    let p_rel = Set.mem rel_rs p in
+    let indices' = if p_rel then update_indices indices p else indices in
+    let lcp' = 
+        if p_rel then Map.update lcp q ~f:(function | _ -> Map.find_exn lcp p)
+        else 
+        let lcp_inter = Map.update lcp q ~f:(function | _ -> indexed_role indices p) 
+        in Map.update lcp_inter p ~f:(function | _ -> indexed_role indices p)
+    in
+    let csp' = 
+        if p_rel then Map.update csp q ~f:(function 
+            | None -> Map.find_exn lcp p |> Set.singleton (module RoleName) 
+            | Some s -> Map.find_exn lcp p |> Set.add s)
+        else 
+            let csp_inter = Map.update csp q ~f:(function 
+                | None -> indexed_role indices p |> Set.singleton (module RoleName) 
+                | Some s -> Set.add s (indexed_role indices p))
+            in Map.update csp_inter p ~f:(function 
+                | None -> indexed_role indices p |> Set.singleton (module RoleName) 
+                | Some s -> Set.add s (indexed_role indices p))
+    in (indices', lcp', csp')
 
 
-            if skip_communication 
-                then generate_crash_branch allow_local t' crashed_r aware_rs 
-            else if notify                 
-            then 
-                let aware_rs' = Set.add aware_rs receiver in
-                MessageG ( {label = LabelName.of_string label; payload = []}
-                              , sender
-                              , receiver
-                              , generate_crash_branch allow_local t' crashed_r aware_rs' )
-            else if allow_local
-                then MessageG ( msg
-                              , sender
-                              , receiver
-                              , generate_crash_branch allow_local t' crashed_r aware_rs )
-            else
-                uerr @@ UnawareOfCrash (sender, receiver)
+let rec _crash_branch ~rel_rs ~indices ~crs ~lcp ~csp ~rec_t ~unf = function
+        | MessageG (_, p, q, t') ->
+            let p_crashed = Set.mem crs p in
+            let q_crashed = Set.mem crs q in
+            let p_rel = Set.mem rel_rs p in
+            let gf_skip_cond = gf_skip csp p q in
+            let (indices', lcp', csp') = update_gf_param rel_rs indices lcp csp p q in
 
-        | ChoiceG (p, choices) ->
-            (* with the assumption that every choice has a communication between sender and another role *)
-            if RoleName.equal p crashed_r || not allow_local
-            then 
-                match List.hd choices with
-                | Some (MessageG (m, s, r, t)) ->
-                        let msg_g = MessageG (m, s, r, t) in
-                        generate_crash_branch allow_local msg_g crashed_r aware_rs
-                | _ -> unimpl ~here:[%here] 
-                "Generating crash behaviour in choice that \ 
-                does not start with a message" 
+            if p_crashed && q_crashed
+            then _crash_branch ~rel_rs ~indices:indices' 
+                               ~crs ~lcp:lcp' ~csp:csp' ~rec_t ~unf t'
+            else if gf_skip_cond
+            then _crash_branch ~rel_rs ~indices:indices' 
+                               ~crs ~lcp:lcp' ~csp:csp' ~rec_t ~unf t'
+            else if p_crashed && (not gf_skip_cond)
+            then
+                MessageG ( {label = LabelName.of_string "CRASH"; payload = []}
+                          , p , q
+                          , _crash_branch ~rel_rs ~indices:indices' 
+                          ~crs ~lcp:lcp' ~csp:csp' ~rec_t ~unf t')
+            (*check that sender is aware of crash*)
+            else if not (Map.mem csp p) 
+            then uerr @@ UnawareOfCrash (p, q)
+            else if p_rel && (not gf_skip_cond)
+            then
+                MessageG ( {label = LabelName.of_string "EXIT"; payload = []}
+                          , p , q
+                          , _crash_branch ~rel_rs ~indices:indices' 
+                          ~crs ~lcp:lcp' ~csp:csp' ~rec_t ~unf t')
             else 
-                ChoiceG ( p
-                        , List.map choices
-                            ~f: (fun ch -> generate_crash_branch allow_local ch crashed_r aware_rs))
+            let crs' = Set.add crs p in
+            ChoiceG ( p
+                    , [ MessageG ( {label = LabelName.of_string "CRASH"; payload = []}
+                                , p , q
+                                , _crash_branch ~rel_rs ~indices:indices' 
+                                ~crs:crs' ~lcp:lcp' ~csp:csp' ~rec_t ~unf t')
+                    ; MessageG ( {label = LabelName.of_string "EXIT"; payload = []}
+                                , p , q
+                                , _crash_branch ~rel_rs ~indices:indices' 
+                                ~crs ~lcp:lcp' ~csp:csp' ~rec_t ~unf t')])
 
-        | MuG (tvar, el, t) -> 
-                MuG ( tvar
-                    , el
-                    , generate_crash_branch allow_local t crashed_r aware_rs) 
+        | ChoiceG (_, choices) ->
+            ( match List.hd choices with
+            | Some some_branch ->
+                    _crash_branch ~rel_rs ~indices 
+                                  ~crs ~lcp ~csp ~rec_t ~unf some_branch
+            | _ -> unimpl ~here:[%here] 
+            "Generating crash behaviour in empty choice" ) 
+
+        | MuG (tvar, _, t) -> 
+                let rec_t' = Map.add_exn rec_t ~key:tvar ~data:t in
+                let cont = _crash_branch ~rel_rs ~indices ~crs ~lcp ~csp 
+                                         ~rec_t:rec_t' ~unf t in
+                cont
+        | TVarG (tvar, _, _) -> 
+                let t' = if Set.mem unf tvar 
+                         then EndG
+                         else Map.find_exn rec_t tvar in
+                let unf' = Set.add unf tvar in
+                _crash_branch ~rel_rs ~indices ~crs ~lcp ~csp 
+                                         ~rec_t ~unf:unf' t' 
         | CallG (caller, protocol, participants, t) -> 
                 CallG ( caller
                       , protocol
                       , participants
-                      , generate_crash_branch allow_local t crashed_r aware_rs)
+                      , _crash_branch ~rel_rs ~indices ~crs ~lcp ~csp ~unf ~rec_t t)
         | EndG -> EndG
-        | other_t -> other_t
 
 let apply_to_continuation f = function
     | MessageG (msg, s, r, t) -> MessageG(msg, s, r, f t)
     | g -> f g 
 
-let rec basic_add_crash_branches reliable_rs = function
+let rec _basic_add_crash_branches reliable_rs = function
     | MessageG (msg, sender, receiver, t) -> 
         if Set.mem reliable_rs sender 
         then 
             MessageG ( msg
                      , sender
                      , receiver
-                     , basic_add_crash_branches reliable_rs t)
+                     , _basic_add_crash_branches reliable_rs t)
         else
             ChoiceG(
             sender,
             [ MessageG ({ label = LabelName.of_string "CRASH"; payload = [] } 
                         , sender 
                         , receiver 
-                        , basic_generate_crash_branch sender t
-                        |> basic_add_crash_branches (Set.add reliable_rs sender))
+                        , _basic_generate_crash_branch sender t
+                        |> _basic_add_crash_branches (Set.add reliable_rs sender))
             ; MessageG ( msg
                        , sender
                        , receiver
-                       , basic_add_crash_branches reliable_rs t)])
+                       , _basic_add_crash_branches reliable_rs t)])
 
         | ChoiceG (sender, choices) ->
             (* with the assumption that we do not allow choice of choice of
@@ -804,7 +850,7 @@ let rec basic_add_crash_branches reliable_rs = function
              * only with messages as the first communication *)
             let uncrashed_branches = 
                 List.map
-                ~f: (apply_to_continuation (basic_add_crash_branches reliable_rs))
+                ~f: (apply_to_continuation (_basic_add_crash_branches reliable_rs))
                 choices in
             if Set.mem reliable_rs sender
             then ChoiceG(sender, uncrashed_branches)
@@ -813,68 +859,81 @@ let rec basic_add_crash_branches reliable_rs = function
                 match List.hd choices with
                     | None -> EndG
                     | Some branch -> branch in
-            let aware_rs = 
-                Map.singleton (module RoleName) sender (Set.empty (module RoleName)) in
-            let crash_branch =
-                basic_generate_crash_branch allow_local sender aware_rs some_branch in 
+            let crash_branch = _basic_generate_crash_branch sender some_branch 
+                        |> _basic_add_crash_branches (Set.add reliable_rs sender)
+            in
             ChoiceG(sender, crash_branch :: uncrashed_branches)
 
         | MuG (tvar, el, t) -> 
-                MuG (tvar, el, basic_add_crash_branches allow_local reliable_rs t)
+                MuG (tvar, el, _basic_add_crash_branches reliable_rs t)
         | CallG (c, p, pts, t) -> 
-                CallG (c, p, pts, basic_add_crash_branches allow_local reliable_rs t)
+                CallG (c, p, pts, _basic_add_crash_branches reliable_rs t)
         | EndG -> EndG
         | other_t -> other_t
 
+
 (* add crash branch whenever communication from an unreliable role is found *)
-let rec _add_crash_branches allow_local reliable_rs (gtype : t) = 
-    match gtype with
+let rec _crash_labels
+    ~rel_rs ~indices ~rec_t = function
         | MessageG (msg, sender, receiver, t) -> 
-            if Set.mem reliable_rs sender 
+            if Set.mem rel_rs sender 
             then 
                 MessageG ( msg
                          , sender
                          , receiver
-                         , _add_crash_branches allow_local reliable_rs t)
+                         , _crash_labels ~rel_rs ~indices ~rec_t t)
             else
-                let aware_rs = 
-                    Set.of_list (module RoleName) [sender; receiver] in
+                let sender' = indexed_role indices sender in
+                let indices' = update_indices indices sender in
+                let lcp = Map.of_alist_exn (module RoleName) 
+                            [ (sender, sender'); (receiver, sender')] in             
+                let csp = Map.of_alist_exn (module RoleName) 
+                            [ (sender, Set.singleton (module RoleName) sender')
+                            ; (receiver, Set.singleton (module RoleName) sender')
+                            ] in
+                let crs = Set.singleton (module RoleName) sender in
+                let unf = Set.empty (module TypeVariableName) in
                 ChoiceG(
                 sender,
                 [ MessageG ({ label = LabelName.of_string "CRASH"; payload = [] } 
-                            , sender 
+                            , sender' 
                             , receiver 
-                            , generate_crash_branch allow_local t sender aware_rs)
+                            , _crash_branch 
+                                ~indices: indices'
+                                ~rel_rs ~crs ~lcp ~csp ~rec_t ~unf
+                                t)
                 ; MessageG ( msg
                            , sender
                            , receiver
-                           , _add_crash_branches allow_local reliable_rs t)])
+                           , _crash_labels ~rel_rs ~indices: indices' ~rec_t t)])
 
         | ChoiceG (sender, choices) ->
-            (* with the assumption that we do not allow choice of choice of
-             * we can assume that after unfolding all branches if they start
-             * with a recursion, we are left 
-             * only with messages as the first communication *)
+            let indices' = update_indices indices sender in
             let uncrashed_branches = 
                 List.map
-                ~f: (apply_to_continuation (_add_crash_branches allow_local reliable_rs))
+                ~f: (apply_to_continuation 
+                    (_crash_labels ~rel_rs ~indices: indices' ~rec_t))
                 choices in
-            if Set.mem reliable_rs sender
+            if Set.mem rel_rs sender
             then ChoiceG(sender, uncrashed_branches)
             else
             let some_branch = 
                 match List.hd choices with
                     | None -> EndG
                     | Some branch -> branch in
-            let aware_rs = Set.singleton (module RoleName) sender in
+            let lcp = Map.empty (module RoleName) in
+            let csp = Map.empty (module RoleName) in
+            let crs = Set.singleton (module RoleName) sender in
+            let unf = Set.empty (module TypeVariableName) in
             let crash_branch =
-                generate_crash_branch allow_local some_branch sender aware_rs in 
+                _crash_branch ~rel_rs ~indices ~crs ~lcp ~csp ~rec_t ~unf some_branch in 
             ChoiceG(sender, crash_branch :: uncrashed_branches)
 
         | MuG (tvar, el, t) -> 
-                MuG (tvar, el, _add_crash_branches allow_local reliable_rs t)
+                let rec_t' = Map.add_exn ~key:tvar ~data:t rec_t in
+                MuG (tvar, el, _crash_labels ~rel_rs ~indices ~rec_t:rec_t' t)
         | CallG (c, p, pts, t) -> 
-                CallG (c, p, pts, _add_crash_branches allow_local reliable_rs t)
+                CallG (c, p, pts, _crash_labels ~rel_rs ~indices ~rec_t t)
         | EndG -> EndG
         | other_t -> other_t
 
@@ -884,15 +943,21 @@ let graceful_failure (global_protocol : global_protocol) =
     let open! Syntax in
     let gtype = of_protocol global_protocol in
     let reliable_rs = global_protocol.value.split_roles.reliable_roles in
-    let set_reliable_rs = Set.of_list (module RoleName) reliable_rs in
-    basic_add_crash_branches set_reliable_rs gtype 
+    let rel_rs = Set.of_list (module RoleName) reliable_rs in
+    let indices = 
+        participants gtype
+        |> Set.to_list 
+        |> List.map ~f:(fun r -> (r, 1))
+        |> Map.of_alist_exn (module RoleName) in
+    let rec_t = Map.empty (module TypeVariableName) in
+    _crash_labels ~rel_rs ~indices gtype ~rec_t
 
 let local_graceful_failure (global_protocol : global_protocol) = 
     let open! Syntax in
     let gtype = of_protocol global_protocol in
     let reliable_rs = global_protocol.value.split_roles.reliable_roles in
     let set_reliable_rs = Set.of_list (module RoleName) reliable_rs in
-    basic_add_crash_branches set_reliable_rs gtype 
+    _basic_add_crash_branches set_reliable_rs gtype 
 
 
 module MessageKey = struct
@@ -1137,8 +1202,8 @@ let rec add_failover_branches
                             ~aware_of_rs: aware_of_rs
                             ~glb_prot: glb_prot
                             t in
-                let aware_rs = Set.of_list (module RoleName) [p ; q] in
-                let allow_local = true in
+                let _aware_rs = Set.of_list (module RoleName) [p ; q] in
+                let _allow_local = true in
                 let crash_m = { label = 
                                    LabelName.of_string "CRASH"
                                ; payload =
@@ -1146,7 +1211,7 @@ let rec add_failover_branches
                 MessageG ( crash_m
                          , p
                          , q
-                         , generate_crash_branch allow_local cont p aware_rs )
+                         , _basic_generate_crash_branch p cont )
             in
             let noncrash_branch = 
                 MessageG ( m
