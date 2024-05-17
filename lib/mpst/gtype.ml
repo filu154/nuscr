@@ -1023,19 +1023,17 @@ let rec _crash_branch_lgf
         else if not (Set.mem rel_rs p) && not (aware_of_crash crs pcp p)
         then 
             (*p is not crashed but it is unreliable*)
-            let a' = Set.add a p |> flip Set.add q in
             let crash_branch = 
                 let crs' = Set.add crs p in
-                _crash_branch_lgf ~rel_rs ~indices:indices' ~crs:crs' ~cb
-                                  ~pcp ~aw:aw' ~a:a' ~rec_t some_branch in
+                _crash_branch_lgf ~rel_rs ~indices ~crs:crs' ~cb
+                                  ~pcp ~aw ~a ~rec_t some_branch in
             ChoiceG(p, crash_branch :: List.map choices
                 ~f: (apply_to_continuation 
                     (_crash_branch_lgf ~rel_rs ~indices:indices' ~crs ~cb 
                                        ~pcp ~aw:aw' ~a ~rec_t)))
         else
-            let a' = Set.add a q in
-            _crash_branch_lgf ~rel_rs ~indices:indices' ~crs ~cb ~pcp 
-                              ~aw: aw' ~a:a' ~rec_t some_branch
+            _crash_branch_lgf ~rel_rs ~indices ~crs ~cb ~pcp 
+                              ~aw ~a ~rec_t some_branch
 
     | MuG (tvar, el, t) -> 
             let rec_t' = Map.add_exn rec_t ~key:tvar ~data:t in
@@ -1239,15 +1237,15 @@ let graceful_failure (global_protocol : global_protocol) =
     let open! Syntax in
     let gtype = of_protocol global_protocol in
     let reliable_rs = global_protocol.value.split_roles.reliable_roles in
-    let _rel_rs = Set.of_list (module RoleName) reliable_rs in
-    let _indices = 
+    let rel_rs = Set.of_list (module RoleName) reliable_rs in
+    let indices = 
         participants gtype
         |> Set.to_list 
         |> List.map ~f:(fun r -> (r, 1))
         |> Map.of_alist_exn (module RoleName) in
-    let _rec_t = Map.empty (module TypeVariableName) in
-    _basic_add_crash_branches _rel_rs gtype
-    (* _crash_labels ~rel_rs ~indices gtype ~rec_t *)
+    let rec_t = Map.empty (module TypeVariableName) in
+    (* _basic_add_crash_branches _rel_rs gtype *)
+    _crash_labels ~rel_rs ~indices gtype ~rec_t 
 
 module RoleNamePair = struct
     module Pair = struct
@@ -1262,6 +1260,7 @@ let local_graceful_failure (global_protocol : global_protocol) =
     let gtype = of_protocol global_protocol in
     let reliable_rs = global_protocol.value.split_roles.reliable_roles in
     let rel_rs = Set.of_list (module RoleName) reliable_rs in
+    (* _basic_crash_labels_lgf rel_rs gtype *)
     let indices = 
         participants gtype
         |> Set.to_list 
@@ -1273,7 +1272,7 @@ let local_graceful_failure (global_protocol : global_protocol) =
     let aw = Map.empty (module RoleName) in
     let a = Set.empty (module RoleName) in
     let rec_t = Map.empty (module TypeVariableName) in
-    _crash_branch_lgf ~rel_rs ~indices ~crs ~cb ~pcp ~aw ~a ~rec_t gtype
+    _crash_branch_lgf ~rel_rs ~indices ~crs ~cb ~pcp ~aw ~a ~rec_t gtype 
 
 
 module MessageKey = struct
@@ -1447,60 +1446,74 @@ let rec find_witnesses w rel_rs = function
                 ~f: (fun accum ws -> 
             Map.merge_skewed accum ws
                 ~combine: (fun ~key: _ v1 v2 -> 
-                    if RoleName.equal v1 v2 && Set.mem rel_rs v1 then v1 else w) )
+                    if RoleName.equal v1 v2 
+                    then if Set.mem rel_rs v1 
+                         then v1 (*equal and reliable, keep*)
+                         else w
+                    else if Set.mem rel_rs v1 && not (Set.mem rel_rs v2)
+                         then v1 (*not equal, one reliable, keep reliable*)
+                         else if Set.mem rel_rs v2 && not (Set.mem rel_rs v1)
+                         then v2 (*not equal, one reliable, keep reliable*)
+                         else v1 (*both reliable, keep one of them*)) )
     | MuG (_, _, t) -> find_witnesses w rel_rs t
     | CallG (_, _, _, t) -> find_witnesses w rel_rs t
     | _ -> Map.empty (module RoleName)
 
-let rec add_witnesses rel_rs ws = function
+let update_annot annot p i =
+    let prev_annot = Map.find_exn annot p in
+    Map.update annot p ~f:(fun _ -> prev_annot * 10 + i)
+
+let rec add_witnesses rel_rs ws annot = function
     | MessageG (m, p, q, t) ->
             let p_rel = Set.mem rel_rs p in
             let q_rel = Set.mem rel_rs q in
-            let cont = add_witnesses rel_rs ws t in
-            if not p_rel 
+            let cont = add_witnesses rel_rs ws annot t in
+            if not p_rel && not (Set.mem (senders t) p)
             then 
                 let w = Map.find_exn ws p in
+                let annot_p = Map.find_exn annot p in
+                let label = "CHECK" ^ Int.to_string annot_p in
+                let m' = { label = LabelName.of_string label; payload = [] } in
                 if not q_rel
-                then MessageG (m, p, w, MessageG (m, w, q, cont))
+                then MessageG (m, p, q, MessageG (m', p, w, cont))
                 else if RoleName.equal q w
                      then MessageG (m, p, q, cont)
-                     else MessageG (m, p, w, MessageG (m, w, q, cont))
+                     else MessageG (m, p, q, MessageG (m', p, w, cont))
             else MessageG(m, p, q, cont)
 
     | ChoiceG (p, choices) ->
-            ChoiceG (p, List.map ~f:(add_witnesses rel_rs ws) choices)
-    | MuG (tvar, es, t) -> MuG (tvar, es, add_witnesses rel_rs ws t)
+            let index = 1 in
+            let q = match List.hd_exn choices with
+                | MessageG (_, _, q, _) -> q
+                | _ -> unimpl ~here:[%here] "Choice with non-message branch" in
+            let (annot_choices, _) = List.fold choices
+                ~init: ([], index)
+                ~f: (fun accum ch -> 
+                    let (chs, i) = accum in ((ch,i) :: chs, i+1)) in
+            ChoiceG (p, 
+                List.map ~f:(fun (ch, i) ->
+                    let annot' = update_annot annot p i in
+                    let annot' = update_annot annot' q i in
+                    add_witnesses rel_rs ws annot' ch) annot_choices)
+    | MuG (tvar, es, t) -> MuG (tvar, es, add_witnesses rel_rs ws annot t)
     | CallG (caller, protocol, participants, t) -> 
             CallG ( caller
                   , protocol
                   , participants
-                  , add_witnesses rel_rs ws t)
+                  , add_witnesses rel_rs ws annot t)
     | other_t -> other_t
 
-let rec append_to_cont to_append = function
-    | MessageG (m, p, q, t) -> MessageG (m, p, q, append_to_cont to_append t)
+let rec _append_to_cont to_append = function
+    | MessageG (m, p, q, t) -> MessageG (m, p, q, _append_to_cont to_append t)
     | ChoiceG (p, choices) -> ChoiceG (p, List.map 
-                                        ~f:(append_to_cont to_append) choices)
-    | MuG (tvar, el, t) -> MuG (tvar, el, append_to_cont to_append t)
+                                        ~f:(_append_to_cont to_append) choices)
+    | MuG (tvar, el, t) -> MuG (tvar, el, _append_to_cont to_append t)
     | CallG (caller, protocol, participants, t) -> 
             CallG ( caller
                   , protocol
                   , participants
-                  , append_to_cont to_append t)
+                  , _append_to_cont to_append t)
     |_ -> to_append
-
-let unaware pcp p = not (Map.mem pcp p)
-let aware_of_crashed_r pcp p r = 
-     match Map.find pcp p with
-                  | None -> false
-                  | Some m -> Map.mem m r 
-
-let not_waiting aw p q = 
-    Map.fold aw ~init: true
-        ~f: (fun ~key:_ ~data acc -> 
-            if Set.mem data p 
-            then acc && Set.mem data q
-            else acc)
 
 let cp_of r' = 
     let r'_str = RoleName.user r' in
@@ -1512,6 +1525,24 @@ let is_cp_of r' r =
     let r_str = RoleName.user r in
     let r'_str = cp_of r' in
     String.equal r'_str r_str
+
+let unaware pcp p = not (Map.mem pcp p)
+let aware_of_crashed_r pcp p r = 
+     match Map.find pcp p with
+                  | None -> false
+                  | Some m -> Map.mem m r 
+
+let not_waiting cb aw p q = 
+    Map.fold aw ~init: true
+        ~f: (fun ~key:cp ~data acc -> 
+            if Set.mem data p 
+            then 
+                let c = RoleName.of_string (cp_of cp) in 
+                let comm_before = match Map.find cb c with
+                                 | None -> false
+                                 | Some s -> Set.mem s (p,q) || Set.mem s (q, p)
+                in acc && (comm_before || Set.mem data q)
+            else acc)
 
 (*check if role r should be attached to label sent by p*)
 let attach_to_label cb pcp aw p q r =
@@ -1546,8 +1577,10 @@ let compute_label m l cb pcp aw p q =
         ~f: (fun acc r -> acc ^ (RoleName.user r))
 
 let failover_skip cb pcp aw p q = 
+    if unaware pcp p then false
+    else
     let notify_abt = notify_about cb pcp aw p q in
-    Set.is_empty notify_abt && not_waiting aw p q
+    Set.is_empty notify_abt && not_waiting cb aw p q
 
 
 let update_failover_aw rel_rs indices aw p q = 
@@ -1590,9 +1623,13 @@ let update_failover_pcp indices crs cb pcp aw p q =
 let update_failover_cb crs cb pcp aw p q = 
     if Set.mem crs p
     then if not (aware_of_crashed_r pcp q p)
-         then Map.add_exn cb ~key:p 
+         then Map.update cb p 
+            ~f:(fun s -> match s with
+                | None -> Set.of_list (module RoleNamePair) [(p,q) ; (q,p)]
+                | Some s' -> Set.add s' (p,q) |> flip Set.add (q,p))
+             (* Map.add_exn cb ~key:p 
                 ~data: ( [(p,q) ; (q,p)] 
-                     |> Set.of_list (module RoleNamePair) )
+                     |> Set.of_list (module RoleNamePair) ) *)
          else cb
     else 
         let notify_abt = notify_about cb pcp aw p q in
@@ -1642,9 +1679,16 @@ let rec _failover ~rel_rs ~bs ~dw ~ws ~indices ~hs ~crs ~cb ~pcp ~aw ~rec_t ~g_r
         else
         (*p is unreliable*)
         if not p_crashed
-        then let safe_branch = 
+        then if q_crashed && aware_of_crashed_r pcp p q
+             then _failover ~rel_rs ~bs ~dw ~ws ~indices:indices' ~hs ~crs ~cb 
+                            ~pcp ~aw:aw' ~rec_t ~g_res t
+             else if failover_skip cb pcp aw p q
+             then _failover ~rel_rs ~bs ~dw ~ws ~indices:indices' ~hs ~crs ~cb 
+                            ~pcp ~aw:aw' ~rec_t ~g_res t
+             else  
+             let safe_branch = 
                 let l = "CRASHED_" in
-                let label = compute_label m l cb pcp aw p q in
+                let label = compute_label m l cb pcp aw p q in 
                 let m' = { label = LabelName.of_string label ; payload = [] } in
                 let pcp' = update_failover_pcp indices crs cb pcp aw p q in
                 let cb' = update_failover_cb crs cb pcp aw p q in
@@ -1733,14 +1777,18 @@ let rec _failover ~rel_rs ~bs ~dw ~ws ~indices ~hs ~crs ~cb ~pcp ~aw ~rec_t ~g_r
             ChoiceG(p, crash_branch :: safe_branches)
     | MuG (tvar, el, t) -> 
             let rec_t' = Set.add rec_t tvar in
-            MuG (tvar, el, _failover ~rel_rs ~bs ~dw ~ws ~indices ~hs ~crs 
-                                     ~cb ~pcp ~aw ~rec_t:rec_t' ~g_res t)
+            if Set.is_empty crs 
+            then MuG (tvar, el, _failover ~rel_rs ~bs ~dw ~ws ~indices 
+                                          ~hs ~crs ~cb ~pcp ~aw 
+                                          ~rec_t:rec_t' ~g_res t)
+            else _failover ~rel_rs ~bs ~dw ~ws ~indices ~hs ~crs ~cb ~pcp 
+                           ~aw ~rec_t:rec_t' ~g_res t
     | CallG (caller, protocol, participants, t) -> 
             CallG (caller, protocol, participants, 
                    _failover ~rel_rs ~bs ~dw ~ws ~indices ~hs ~crs ~cb ~pcp 
                              ~aw ~rec_t ~g_res t)
     | other_t -> _recovery_protocol ~rel_rs ~bs ~dw ~ws ~indices ~hs ~crs ~cb ~pcp 
-                                   ~aw ~rec_t ~g_res other_t
+                                   ~aw ~rec_t ~g_res other_t 
 
 and _recovery_protocol ~rel_rs ~bs ~dw ~ws ~indices ~hs ~crs ~cb ~pcp ~aw ~rec_t ~g_res t = 
     let hs' = Set.union hs crs in
@@ -1754,8 +1802,23 @@ and _recovery_protocol ~rel_rs ~bs ~dw ~ws ~indices ~hs ~crs ~cb ~pcp ~aw ~rec_t
                     _failover ~rel_rs ~bs ~dw ~ws ~indices ~hs:hs'
                               ~crs:crs' ~cb:cb' ~pcp:pcp' ~aw:aw' 
                               ~rec_t ~g_res:restart restart in
+    (* let _rel_rs = rel_rs in
+    let _bs = bs in
+    let _dw = dw in
+    let _ws = ws in
+    let _indices = indices in
+    let _hs = hs in
+    let _crs = crs in
+    let _rec_t = rec_t in
+    let _cb = cb in
+    let _pcp = pcp in 
+    let _aw = aw in
+    let _hs' = hs' in *)
     (*all witnesses send messages to default witness dw about 
      their corresponding unreliable role*)
+    let dw = if Set.mem (participants g_res) dw 
+             then dw (*default witness is part of protocol*)
+             else Map.data ws |> List.hd_exn in
     let init = if Set.is_empty crs then t else cont in
     let senders = senders g_res in
     let pt = participants g_res in
@@ -1771,14 +1834,14 @@ and _recovery_protocol ~rel_rs ~bs ~dw ~ws ~indices ~hs ~crs ~cb ~pcp ~aw ~rec_t
             else
             let aw' = update_failover_aw rel_rs indices aw_a w dw in
             let pcp' = update_failover_pcp indices crs cb_a pcp_a aw_a w dw in
-            let cb' = update_failover_cb crs cb_a pcp_a aw_a p w in
-            if failover_skip cb pcp aw p w
+            let cb' = update_failover_cb crs cb_a pcp_a aw_a w dw in
+            if failover_skip cb pcp aw w dw
              then (*no crashed roles to notify about*)
                  if Set.mem safe_rs p
                  then (*need to send safe message*) 
                      let label = LabelName.of_string ("SAFE_" ^ RoleName.user p) in
                      ( MessageG( { label = label; payload = [] }
-                               , p, w, cont_a)
+                               , w, dw, cont_a)
                      , cb', pcp', aw' )
                  else (cont_a, cb', pcp', aw')
              else
@@ -1843,10 +1906,7 @@ and _recovery_protocol ~rel_rs ~bs ~dw ~ws ~indices ~hs ~crs ~cb ~pcp ~aw ~rec_t
                     if failover_skip _cb' _pcp' _aw' dw p
                     then accum
                     else MessageG(m', dw, p, accum) ) in
-    append_to_cont dw_to_rs to_dw
-            
-
-
+    _append_to_cont dw_to_rs to_dw 
 
 let failover (global_protocol : global_protocol) = 
     let open! Syntax in
@@ -1863,7 +1923,10 @@ let failover (global_protocol : global_protocol) =
         (*TODO: raise error for duplicate*)
         | `Duplicate_key _  -> Map.empty(module RoleName) in
     let ws = find_witnesses dw rel_rs gtype in
-    let gtype' = add_witnesses rel_rs ws gtype in
+    let annot = participants gtype |> Set.to_list
+                |> List.map ~f:(fun r -> (r, 0))
+                |> Map.of_alist_exn (module RoleName) in
+    let gtype' = add_witnesses rel_rs ws annot gtype in
     let indices = 
         participants gtype'
         |> Set.to_list 
@@ -1876,4 +1939,4 @@ let failover (global_protocol : global_protocol) =
     let aw = Map.empty (module RoleName) in
     let rec_t = Set.empty (module TypeVariableName) in
     _failover ~rel_rs ~bs ~dw ~ws ~indices ~hs ~crs ~cb 
-              ~pcp ~aw ~rec_t ~g_res:gtype' gtype'
+              ~pcp ~aw ~rec_t ~g_res:gtype' gtype' 
