@@ -1260,7 +1260,8 @@ let local_graceful_failure (global_protocol : global_protocol) =
     let gtype = of_protocol global_protocol in
     let reliable_rs = global_protocol.value.split_roles.reliable_roles in
     let rel_rs = Set.of_list (module RoleName) reliable_rs in
-    (* _basic_crash_labels_lgf rel_rs gtype *)
+    _basic_crash_labels_lgf rel_rs gtype 
+    (*
     let indices = 
         participants gtype
         |> Set.to_list 
@@ -1272,7 +1273,7 @@ let local_graceful_failure (global_protocol : global_protocol) =
     let aw = Map.empty (module RoleName) in
     let a = Set.empty (module RoleName) in
     let rec_t = Map.empty (module TypeVariableName) in
-    _crash_branch_lgf ~rel_rs ~indices ~crs ~cb ~pcp ~aw ~a ~rec_t gtype 
+    _crash_branch_lgf ~rel_rs ~indices ~crs ~cb ~pcp ~aw ~a ~rec_t gtype *)
 
 
 module MessageKey = struct
@@ -1446,15 +1447,9 @@ let rec find_witnesses w rel_rs = function
                 ~f: (fun accum ws -> 
             Map.merge_skewed accum ws
                 ~combine: (fun ~key: _ v1 v2 -> 
-                    if RoleName.equal v1 v2 
-                    then if Set.mem rel_rs v1 
-                         then v1 (*equal and reliable, keep*)
-                         else w
-                    else if Set.mem rel_rs v1 && not (Set.mem rel_rs v2)
-                         then v1 (*not equal, one reliable, keep reliable*)
-                         else if Set.mem rel_rs v2 && not (Set.mem rel_rs v1)
-                         then v2 (*not equal, one reliable, keep reliable*)
-                         else v1 (*both reliable, keep one of them*)) )
+                    if RoleName.equal v1 v2 && Set.mem rel_rs v1 
+                    then v1 (*equal and reliable, keep*)
+                         else w) )
     | MuG (_, _, t) -> find_witnesses w rel_rs t
     | CallG (_, _, _, t) -> find_witnesses w rel_rs t
     | _ -> Map.empty (module RoleName)
@@ -1463,23 +1458,43 @@ let update_annot annot p i =
     let prev_annot = Map.find_exn annot p in
     Map.update annot p ~f:(fun _ -> prev_annot * 10 + i)
 
-let rec add_witnesses rel_rs ws annot = function
+let rec add_witnesses ate v rel_rs ws annot = function
     | MessageG (m, p, q, t) ->
-            let p_rel = Set.mem rel_rs p in
-            let q_rel = Set.mem rel_rs q in
-            let cont = add_witnesses rel_rs ws annot t in
-            if not p_rel && not (Set.mem (senders t) p)
-            then 
-                let w = Map.find_exn ws p in
-                let annot_p = Map.find_exn annot p in
-                let label = "CHECK" ^ Int.to_string annot_p in
-                let m' = { label = LabelName.of_string label; payload = [] } in
-                if not q_rel
-                then MessageG (m, p, q, MessageG (m', p, w, cont))
-                else if RoleName.equal q w
-                     then MessageG (m, p, q, cont)
-                     else MessageG (m, p, q, MessageG (m', p, w, cont))
-            else MessageG(m, p, q, cont)
+            if v = 1
+            then
+                let p_rel = Set.mem rel_rs p in
+                let q_rel = Set.mem rel_rs q in
+                let cont = add_witnesses ate v rel_rs ws annot t in
+                if not p_rel && not (Set.mem (senders t) p)
+                then 
+                    let w = Map.find_exn ws p in
+                    if not q_rel
+                        then MessageG (m, p, w, MessageG (m, w, q, cont))
+                    else if RoleName.equal q w
+                         then MessageG (m, p, q, cont)
+                         else 
+                             MessageG (m, p, w, MessageG (m, w, q, cont))
+                else MessageG(m, p, q, cont)
+            else if v = 2 && not ate
+            then
+                let p_rel = Set.mem rel_rs p in
+                let q_rel = Set.mem rel_rs q in
+                let cont = add_witnesses ate v rel_rs ws annot t in
+                let _annot_p = Map.find_exn annot p in
+                let label = "CHECK" ^ (Int.to_string _annot_p) in
+                let m' = { label = LabelName.of_string label ; payload = [] } in
+                if not p_rel && not (Set.mem (senders t) p)
+                then 
+                    let w = Map.find_exn ws p in
+                    if not q_rel
+                        then MessageG (m, p, q, MessageG (m', p, w, cont))
+                    else if RoleName.equal q w
+                         then MessageG (m, p, q, cont)
+                         else 
+                             MessageG (m, p, q, MessageG (m', p, w, cont))
+                else MessageG(m, p, q, cont)
+            else
+                MessageG(m,p,q, add_witnesses ate v rel_rs ws annot t)
 
     | ChoiceG (p, choices) ->
             let index = 1 in
@@ -1490,18 +1505,46 @@ let rec add_witnesses rel_rs ws annot = function
                 ~init: ([], index)
                 ~f: (fun accum ch -> 
                     let (chs, i) = accum in ((ch,i) :: chs, i+1)) in
+            let requires_witness = List.fold choices ~init:false
+                ~f: (fun acc ch -> 
+                    match ch with
+                    | MessageG (_, p, _, t) -> 
+                        let req = not (Set.mem (senders t) p) in
+                        acc || req
+                    | _ -> acc) in
+            if v = 1 && requires_witness && not (Set.mem rel_rs p)
+            then
+                let update_choices = List.map choices
+                    ~f:(fun ch -> 
+                        match ch with
+                        | MessageG (m, p, q, t) -> 
+                            let w = Map.find_exn ws p in
+                            if not (RoleName.equal q w)
+                            then MessageG (m, p, w, MessageG (m, w, q, add_witnesses ate v rel_rs ws annot t))
+                            else MessageG (m, p, q, add_witnesses ate v rel_rs ws annot t)
+                        | _ -> ch) in
+                ChoiceG (p, update_choices)
+            else
             ChoiceG (p, 
                 List.map ~f:(fun (ch, i) ->
                     let annot' = update_annot annot p i in
                     let annot' = update_annot annot' q i in
-                    add_witnesses rel_rs ws annot' ch) annot_choices)
-    | MuG (tvar, es, t) -> MuG (tvar, es, add_witnesses rel_rs ws annot t)
+                    add_witnesses ate v rel_rs ws annot' ch) annot_choices)
+    | MuG (tvar, es, t) -> MuG (tvar, es, add_witnesses ate v rel_rs ws annot t)
     | CallG (caller, protocol, participants, t) -> 
             CallG ( caller
                   , protocol
                   , participants
-                  , add_witnesses rel_rs ws annot t)
-    | other_t -> other_t
+                  , add_witnesses ate v rel_rs ws annot t)
+    | other_t -> 
+            if v = 2 && ate then
+            Map.fold ws ~init: other_t
+            ~f: (fun ~key: p ~data: w acc ->
+                let _annot_p = Map.find_exn annot p in
+                let label = "CHECK" ^ (Int.to_string _annot_p) in
+                let m' = { label = LabelName.of_string label ; payload = [] } in
+                MessageG (m', p, w, acc))
+            else other_t
 
 let rec _append_to_cont to_append = function
     | MessageG (m, p, q, t) -> MessageG (m, p, q, _append_to_cont to_append t)
@@ -1924,9 +1967,15 @@ let failover (global_protocol : global_protocol) =
         | `Duplicate_key _  -> Map.empty(module RoleName) in
     let ws = find_witnesses dw rel_rs gtype in
     let annot = participants gtype |> Set.to_list
-                |> List.map ~f:(fun r -> (r, 0))
+                |> List.map ~f:(fun r -> (r, 1))
                 |> Map.of_alist_exn (module RoleName) in
-    let gtype' = add_witnesses rel_rs ws annot gtype in
+    let v = 1 in
+    let append_at_end = false in 
+    let gtype' = add_witnesses append_at_end v rel_rs ws annot gtype in
+    let just_ws = true in 
+    if just_ws
+    then gtype'
+    else
     let indices = 
         participants gtype'
         |> Set.to_list 
